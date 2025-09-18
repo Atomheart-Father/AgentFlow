@@ -504,6 +504,32 @@ class AgentCore:
                 "error": f"处理请求时发生错误: {str(e)}"
             }
 
+    async def _process_with_m3_stream(self, user_query: str, context: Optional[Dict[str, Any]] = None):
+        """使用M3编排器处理查询（流式）"""
+        if not hasattr(self, 'orchestrator') or not self.orchestrator:
+            yield {"error": "M3编排器未初始化"}
+            return
+
+        try:
+            # 创建会话ID
+            session_id = f"session_{int(time.time())}_{hash(user_query) % 10000}"
+
+            # 执行编排
+            result = await self.orchestrator.orchestrate(user_query=user_query, context=context)
+
+            # 返回最终结果
+            yield {
+                "final_answer": result.final_answer or "处理完成",
+                "tool_trace": [],  # M3模式暂时不支持详细工具追踪
+                "status": result.status,
+                "execution_time": result.total_time,
+                "done": True
+            }
+
+        except Exception as e:
+            logger.error(f"M3流式处理失败: {e}")
+            yield {"error": f"处理失败: {str(e)}"}
+
     async def _process_with_m3(self, user_query: str, context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """
         使用M3编排器处理用户查询
