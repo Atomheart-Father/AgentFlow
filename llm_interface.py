@@ -120,7 +120,7 @@ class GeminiProvider(LLMProvider):
 class DeepSeekProvider(LLMProvider):
     """DeepSeek提供者"""
 
-    def __init__(self, api_key: str, base_url: str = "https://api.deepseek.com", model: str = "deepseek-chat"):
+    def __init__(self, api_key: str, base_url: str = "https://api.deepseek.com", model: str = "deepseek-reasoner"):
         # 使用异步客户端
         from openai import AsyncOpenAI
         self.client = AsyncOpenAI(

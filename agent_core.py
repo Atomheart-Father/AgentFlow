@@ -26,6 +26,19 @@ class AgentCore:
             "llm_initialized": self.llm.provider is not None
         })
 
+    def set_llm_interface(self, llm_interface) -> None:
+        """
+        设置LLM接口
+
+        Args:
+            llm_interface: LLM接口实例
+        """
+        self.llm = llm_interface
+        logger.info("LLM接口已更新", extra={
+            "provider": self.config.model_provider,
+            "llm_initialized": self.llm.provider is not None
+        })
+
     async def process(self, user_input: str, context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """
         处理用户输入
