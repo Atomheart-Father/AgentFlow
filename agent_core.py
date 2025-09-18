@@ -534,25 +534,59 @@ class AgentCore:
             return
 
         try:
-            # 状态：开始规划
-            print("[DEBUG] 发送状态事件: 正在规划任务")
-            yield {"type": "status", "message": "正在规划任务"}
+            # 检查是否是续跑场景（context包含user_answer）
+            is_resume = context and "user_answer" in context
 
-            # 模拟规划过程的思维链
-            planning_steps = [
-                "分析用户查询意图...",
-                "制定执行计划...",
-                "准备调用相关工具...",
-                "优化执行步骤..."
-            ]
+            if is_resume:
+                # 续跑场景：继续执行已有的任务
+                print("[DEBUG] 检测到续跑场景，开始继续执行任务")
+                yield {"type": "status", "message": "正在继续执行任务"}
 
-            for step in planning_steps:
-                print(f"[DEBUG] 发送思维链: {step}")
-                yield {"type": "assistant_content", "content": step + " "}
-                await asyncio.sleep(0.1)
+                session_id = context.get("session_id")
+                user_answer = context.get("user_answer")
 
-            # 执行编排（暂时还是同步的）
-            result = await self.orchestrator.orchestrate(user_query=user_query, context=context)
+                if session_id:
+                    from orchestrator import get_session
+                    session = get_session(session_id)
+
+                    if session.active_task:
+                        # 使用现有的任务状态继续执行
+                        # 将用户答案添加到execution_state中
+                        if session.active_task.execution_state:
+                            # 查找等待用户输入的步骤，并设置答案
+                            for step_id, artifact in session.active_task.execution_state.artifacts.items():
+                                if isinstance(artifact, dict) and artifact.get("type") == "ask_user_pending":
+                                    output_key = artifact.get("output_key", "user_answer")
+                                    session.active_task.execution_state.set_artifact(output_key, user_answer)
+                                    break
+
+                        # 使用现有的active_task继续编排
+                        result = await self.orchestrator.orchestrate(user_query="", context=context, active_task=session.active_task)
+                    else:
+                        # 没有活跃任务，重新规划
+                        result = await self.orchestrator.orchestrate(user_query="", context=context)
+                else:
+                    result = await self.orchestrator.orchestrate(user_query="", context=context)
+            else:
+                # 正常规划场景
+                print("[DEBUG] 发送状态事件: 正在规划任务")
+                yield {"type": "status", "message": "正在规划任务"}
+
+                # 模拟规划过程的思维链
+                planning_steps = [
+                    "分析用户查询意图...",
+                    "制定执行计划...",
+                    "准备调用相关工具...",
+                    "优化执行步骤..."
+                ]
+
+                for step in planning_steps:
+                    print(f"[DEBUG] 发送思维链: {step}")
+                    yield {"type": "assistant_content", "content": step + " "}
+                    await asyncio.sleep(0.1)
+
+                # 执行编排
+                result = await self.orchestrator.orchestrate(user_query=user_query, context=context)
 
             # 检查是否需要用户输入
             if result.status == "ask_user" and result.pending_questions:
