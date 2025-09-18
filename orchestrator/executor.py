@@ -48,11 +48,37 @@ class ExecutionState:
                 for artifact_key, artifact_value in self.artifacts.items():
                     placeholder = "{{" + artifact_key + "}}"
                     if placeholder in value:
-                        if isinstance(artifact_value, (dict, list)):
-                            # 对于复杂对象，使用JSON序列化
-                            value = value.replace(placeholder, json.dumps(artifact_value, ensure_ascii=False))
+                        # 特殊处理不同类型的结果
+                        if artifact_key == "file_path" and isinstance(artifact_value, dict) and "resolved_path" in artifact_value:
+                            # path_planner的结果：提取resolved_path
+                            replacement = artifact_value["resolved_path"]
+                        elif isinstance(artifact_value, StandardToolResult):
+                            # 工具结果：提取data字段
+                            if artifact_value.ok and artifact_value.data is not None:
+                                if isinstance(artifact_value.data, dict):
+                                    # 如果是字典，尝试提取有意义的内容
+                                    if "current_time" in artifact_value.data:
+                                        replacement = artifact_value.data["current_time"]
+                                    elif "temperature" in artifact_value.data:
+                                        replacement = f"{artifact_value.data.get('temperature', 'N/A')}°C"
+                                    else:
+                                        replacement = json.dumps(artifact_value.data, ensure_ascii=False)
+                                else:
+                                    replacement = str(artifact_value.data)
+                            else:
+                                replacement = f"[工具调用失败: {artifact_value.error.message if artifact_value.error else '未知错误'}]"
+                        elif isinstance(artifact_value, dict):
+                            # 其他字典对象
+                            if "current_time" in artifact_value:
+                                replacement = artifact_value["current_time"]
+                            else:
+                                replacement = json.dumps(artifact_value, ensure_ascii=False)
+                        elif isinstance(artifact_value, list):
+                            replacement = json.dumps(artifact_value, ensure_ascii=False)
                         else:
-                            value = value.replace(placeholder, str(artifact_value))
+                            replacement = str(artifact_value)
+
+                        value = value.replace(placeholder, replacement)
 
                 # 替换 {{user_input}} 等特殊变量
                 for input_key, input_value in self.inputs.items():
@@ -127,21 +153,7 @@ class Executor:
                 state.completed_steps.append(step.id)
 
             except Exception as e:
-                # 检查是否是ask_user工具的结果
-                if isinstance(result, StandardToolResult) and result.ok:
-                    result_data = result.data
-                    if isinstance(result_data, dict) and result_data.get("requires_user_input"):
-                        # 遇到用户询问，保存状态并返回等待用户输入的状态
-                        logger.info(f"步骤 {step.id} 需要用户输入: {result_data['question']}")
-                        state.set_artifact("ask_user_pending", {
-                            "question": result_data["question"],
-                            "context": result_data.get("context", ""),
-                            "message": result_data.get("message", ""),
-                            "step_id": step.id
-                        })
-                        return state  # 返回当前状态，等待用户输入
-
-                # 其他异常
+                # 记录执行错误
                 error_msg = f"步骤 {step.id} 执行失败: {str(e)}"
                 logger.error(error_msg)
                 state.errors.append(error_msg)
