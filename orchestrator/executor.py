@@ -28,6 +28,7 @@ class ExecutionState:
         self.inputs: Dict[str, Any] = {}     # 用户输入
         self.errors: List[str] = []          # 执行错误
         self.completed_steps: List[str] = [] # 已完成的步骤
+        self.asked_questions: List[str] = [] # 已问过的问题
 
     def set_artifact(self, key: str, value: Any):
         """设置步骤产出"""
@@ -320,7 +321,11 @@ class Executor:
         state.set_artifact(step.output_key, result)
 
     async def _execute_summarize(self, step: PlanStep, inputs: Dict[str, Any], state: ExecutionState):
-        """执行总结操作"""
+        """执行智能总结操作 - 根据任务类型灵活调整"""
+        # 获取任务上下文
+        user_query = getattr(state, 'user_query', '未知任务')
+        expect_desc = getattr(step, 'expect', '')
+
         # 智能汇总输入：优先使用data/text/content，否则拼接所有键值
         summary_text = None
         for key in ["data", "text", "content"]:
@@ -339,29 +344,125 @@ class Executor:
                     parts.append(f"{k}: {v}")
             summary_text = "\n".join(parts) if parts else "(无内容)"
 
+        # 根据任务类型和期望动态生成提示词
+        system_prompt = self._generate_smart_summary_prompt(user_query, expect_desc, summary_text)
+
         messages = [
-            {"role": "system", "content": "你是一个专业的总结助手，请简洁准确地总结内容。"},
-            {"role": "user", "content": f"请总结以下内容：\n\n{summary_text}"}
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": f"请处理以下内容：\n\n{summary_text}"}
         ]
 
         response = await self.llm.generate(
             messages=messages,
-            max_tokens=512
+            max_tokens=800  # 增加token限制以支持更丰富的输出
         )
 
         result = response.content.strip()
         state.set_artifact(step.output_key, result)
-        logger.info(f"总结完成: {result[:100]}...")
+        logger.info(f"智能总结完成: {result[:100]}...")
+
+    def _generate_smart_summary_prompt(self, user_query: str, expect_desc: str, content: str) -> str:
+        """根据任务类型生成智能的总结提示词"""
+
+        # 分析任务类型
+        query_lower = user_query.lower()
+        expect_lower = expect_desc.lower()
+
+        # 天气相关任务
+        if any(keyword in query_lower for keyword in ['天气', 'weather', 'temperature', 'climate']):
+            if '规划' in query_lower or 'plan' in query_lower or '行程' in query_lower:
+                return """你是一个智能的旅行规划助手。请基于提供的天气信息，为用户制定合理的行程建议。
+
+任务要求：
+1. 分析天气数据，提取关键信息（温度、天气状况、风力等）
+2. 根据天气状况给出出行建议
+3. 如果天气不佳，建议室内活动或调整出行时间
+4. 提供实用的小贴士（如穿着建议、注意事项等）
+5. 保持建议的实用性和个性化
+
+请用友好的语气给出具体、可操作的建议。"""
+            else:
+                return """你是一个专业的天气分析师。请分析天气数据并给出清晰的总结。
+
+分析要点：
+1. 当前天气状况和温度
+2. 全天/未来天气趋势
+3. 关键指标解读（温度范围、湿度、风力等）
+4. 对日常生活的影响建议
+
+请用简洁明了的语言总结天气情况。"""
+
+        # 文件操作相关
+        elif any(keyword in expect_lower for keyword in ['写入', 'write', '保存', 'save']):
+            return """你是一个专业的文档整理助手。请处理要写入文件的内容。
+
+任务要求：
+1. 整理和优化内容格式
+2. 确保信息完整性和可读性
+3. 如果是数据，转换为适合文档的格式
+4. 添加必要的标题和结构化信息
+
+请生成适合文档的内容格式。"""
+
+        # 通用任务
+        else:
+            return """你是一个智能的内容处理助手。请根据用户的需求灵活处理内容。
+
+通用原则：
+1. 理解用户的核心需求
+2. 提取最相关和有用的信息
+3. 以用户友好的方式组织内容
+4. 提供有价值的洞察或建议
+5. 保持内容的准确性和实用性
+
+请根据具体内容和用户意图给出最合适的响应。"""
 
     async def _execute_write_file(self, step: PlanStep, inputs: Dict[str, Any], state: ExecutionState):
-        """执行写文件步骤"""
+        """执行写文件步骤 - 强化参数规范化"""
+        # 参数规范化：相对日期统一归一化；"写到桌面"映射DESKTOP_DIR安全路径
+        normalized_inputs = inputs.copy()
+
+        # 处理"写到桌面"映射
+        if "path" in normalized_inputs:
+            path_value = normalized_inputs["path"]
+            if isinstance(path_value, str) and ("写到桌面" in path_value or "desktop" in path_value.lower()):
+                normalized_inputs["path"] = "写到桌面"
+
+        # 相对日期归一化
+        if "content" in normalized_inputs:
+            content = normalized_inputs["content"]
+            if isinstance(content, str):
+                # 处理相对日期词
+                relative_date_keywords = ["明天", "后天", "今天", "tomorrow", "day after tomorrow", "today"]
+                content_lower = content.lower()
+                if any(keyword in content_lower for keyword in relative_date_keywords):
+                    try:
+                        norm_result = execute_tool("date_normalize", self.tools, date=content, timezone="Europe/Amsterdam")
+                        if isinstance(norm_result, StandardToolResult) and norm_result.ok and norm_result.data and "normalized_date" in norm_result.data:
+                            # 替换内容中的相对日期
+                            normalized_date = norm_result.data["normalized_date"]
+                            for keyword in relative_date_keywords:
+                                if keyword in content_lower:
+                                    content = content.replace(keyword, normalized_date)
+                                    break
+                            normalized_inputs["content"] = content
+                    except Exception as e:
+                        logger.warning(f"相对日期处理失败: {e}")
+
         # 使用fs_write工具
-        result = execute_tool("fs_write", self.tools, **inputs)
+        result = execute_tool("fs_write", self.tools, **normalized_inputs)
         state.set_artifact(step.output_key, result)
         logger.info(f"写文件步骤 {step.id} 完成，输出到: {step.output_key}")
 
     async def _execute_ask_user(self, step: PlanStep, inputs: Dict[str, Any], state: ExecutionState):
         """执行询问用户步骤"""
+        # 记录已经问过的问题，避免重复提问
+        if "question" in inputs:
+            question = inputs["question"]
+            if question not in state.asked_questions:
+                state.asked_questions.append(question)
+                logger.debug(f"记录已问问题: {question}")
+
         # 使用ask_user工具
         result = execute_tool("ask_user", self.tools, **inputs)
         state.set_artifact(step.output_key, result)

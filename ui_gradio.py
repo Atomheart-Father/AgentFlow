@@ -198,39 +198,17 @@ class ChatUI:
                 assistant_content = ""  # 只进聊天气泡的内容
 
                 async for chunk in self.agent._process_with_m3_stream(user_input, context={"session_id": self.session_id}):
-                    chunk_type = chunk.get("type", "")
-
-                    if chunk_type == "assistant_content":
-                        # 模型可见内容 - 进入聊天气泡
-                        content_piece = chunk.get("content", "")
-                        if content_piece:
-                            assistant_content += content_piece
-                            chat_history[-1] = (user_input, assistant_content)
-
-                    elif chunk_type in ["tool_trace", "status", "debug"]:
-                        # 工具追踪/状态/调试 - 只进状态栏
-                        message = chunk.get("message", "")
-                        if message:
-                            if chunk_type == "status":
-                                tool_trace_text = f"🔄 {message}"
-                            elif chunk_type == "tool_trace":
-                                tool_trace_text = f"🔧 {message}"
-                            else:  # debug
-                                tool_trace_text = f"🐛 {message}"
-
-                    elif chunk_type == "error":
-                        # 错误 - 显示在聊天框并更新状态栏
-                        error_msg = chunk.get("message", "未知错误")
-                        chat_history[-1] = (user_input, f"❌ 处理失败: {error_msg}")
-                        tool_trace_text = f"❌ {error_msg}"
+                    # 统一路由器
+                    routed = self._route_stream_event(chunk)
+                    if routed["chat_append"]:
+                        assistant_content += routed["chat_append"]
+                        chat_history[-1] = (user_input, assistant_content)
+                    if routed["status_text"]:
+                        tool_trace_text = routed["status_text"]
+                    if routed["error_text"]:
+                        chat_history[-1] = (user_input, f"❌ {routed['error_text']}")
+                        tool_trace_text = f"❌ {routed['error_text'] }"
                         break
-
-                    elif chunk_type == "content":
-                        # 兼容旧格式的内容 - 当作assistant_content处理
-                        content_piece = chunk.get("content", "")
-                        if content_piece:
-                            assistant_content += content_piece
-                            chat_history[-1] = (user_input, assistant_content)
 
                 # 流式处理完成
                 if assistant_content and not tool_trace_text.startswith("❌"):
@@ -262,6 +240,38 @@ class ChatUI:
             tool_trace_text = f"❌ 处理失败: {str(e)}"
 
         return None, chat_history, tool_trace_text
+
+    def _route_stream_event(self, chunk: Dict[str, Any]) -> Dict[str, Optional[str]]:
+        """集中管理流式事件路由，返回应写入聊天与状态栏的文本"""
+        chunk_type = chunk.get("type", "")
+        result = {"chat_append": None, "status_text": None, "error_text": None}
+
+        if chunk_type == "assistant_content":
+            content_piece = chunk.get("content", "")
+            if content_piece:
+                result["chat_append"] = content_piece
+        elif chunk_type == "status":
+            message = chunk.get("message", "")
+            if message:
+                result["status_text"] = f"🔄 {message}"
+        elif chunk_type == "tool_trace":
+            message = chunk.get("message", "")
+            if message:
+                result["status_text"] = f"🔧 {message}"
+        elif chunk_type == "debug":
+            message = chunk.get("message", "")
+            if message:
+                result["status_text"] = f"🐛 {message}"
+        elif chunk_type == "error":
+            message = chunk.get("message", "未知错误")
+            result["error_text"] = message
+        elif chunk_type == "content":
+            # 兼容旧格式
+            content_piece = chunk.get("content", "")
+            if content_piece:
+                result["chat_append"] = content_piece
+
+        return result
 
     async def _process_traditional(self, user_input: str, chat_history) -> Tuple[str, List[Tuple[str, str]], str]:
         """传统模式处理（向后兼容）"""

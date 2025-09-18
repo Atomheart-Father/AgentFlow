@@ -59,6 +59,83 @@ python ui_gradio.py
 
 The system will start at `http://localhost:7860`, and you can access the chat interface in your browser.
 
+## 🎯 本地快速试跑
+
+### 环境准备
+
+```bash
+# 安装核心依赖
+pip install -r requirements.txt
+
+# 安装 Chainlit UI 和 RAG 相关依赖
+pip install chainlit chromadb sentence-transformers
+
+# 可选：设置桌面目录环境变量
+export DESKTOP_DIR=~/Desktop/AgentFlow
+```
+
+### 配置 API 密钥
+
+编辑 `.env` 文件设置 API 密钥：
+
+```env
+# 选择模型提供商
+MODEL_PROVIDER=deepseek  # 或 gemini
+
+# DeepSeek 配置（推荐）
+DEEPSEEK_API_KEY=your_deepseek_api_key_here
+DEEPSEEK_BASE_URL=https://api.deepseek.com
+
+# Gemini 配置（可选）
+GEMINI_API_KEY=your_gemini_api_key_here
+
+# 启用功能
+RAG_ENABLED=true
+TOOLS_ENABLED=true
+USE_M3_ORCHESTRATOR=true
+```
+
+### 可选：构建 RAG 索引
+
+```bash
+# 创建文档目录
+mkdir -p ./notes
+
+# 将你的 .md/.txt 文档放入 ./notes/ 目录
+
+# 构建索引
+python -m rag.ingest --src ./notes
+```
+
+### 启动现代化 UI
+
+```bash
+# 使用 Chainlit 启动（推荐）
+chainlit run ui_chainlit.py -w
+
+# 或使用传统 Gradio UI
+python ui_gradio.py
+```
+
+### 测试功能
+
+1. **访问浏览器**：打开 `http://localhost:7860`
+2. **真·流式测试**：发送消息，观察内容逐段显示
+3. **事件分流测试**：查看侧栏的运行日志和工具轨迹
+4. **AskUser 续跑测试**：
+   - 发送需要用户输入的查询（如"帮我规划明天出行"）
+   - 系统会询问城市等信息
+   - 直接在输入框回复，系统会自动续跑任务
+5. **RAG 搜索测试**：如果有文档索引，可以测试文档搜索功能
+
+### 注意事项
+
+- **连接稳定**：Chainlit 默认启用 WebSocket，如断线刷新页面自动重连
+- **会话状态**：同一会话中的 AskUser 会被自动续跑
+- **安全沙箱**：文件写入仅限于 `DESKTOP_DIR` 目录
+- **日志监控**：关键事件记录在 `logs/errors.jsonl`
+- **新任务开始**：输入"新的问题"、"重来"等关键词可重置会话
+
 ## 📁 Project Structure
 
 ```

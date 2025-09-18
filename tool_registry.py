@@ -86,13 +86,37 @@ def load_tools(whitelist: List[str] = None) -> List[Tool]:
             module = importlib.import_module(f"tools.{module_name}")
             logger.debug(f"加载工具模块: {module_name}")
 
-            # 查找工具类（假设类名是模块名的首字母大写版本）
+            # 查找工具类
+            # 首先尝试标准命名规则（模块名首字母大写）
             class_name = "".join(word.capitalize() for word in module_name.split("_"))
-            if hasattr(module, class_name):
-                tool_class = getattr(module, class_name)
-                tool_instance = tool_class()
-                tools.append(tool_instance)
-                logger.info(f"注册工具: {tool_instance.name}")
+
+            # 特殊处理一些不规则的类名
+            special_class_names = {
+                "tool_date_utils": "ToolDateNormalizer",  # 特殊命名
+                "tool_fs_write": "ToolFSWrite",           # 大小写问题
+            }
+
+            # 尝试多个可能的类名
+            possible_class_names = [class_name]
+            if module_name in special_class_names:
+                possible_class_names.insert(0, special_class_names[module_name])
+
+            tool_class = None
+            for candidate_name in possible_class_names:
+                if hasattr(module, candidate_name):
+                    tool_class = getattr(module, candidate_name)
+                    logger.debug(f"找到工具类: {candidate_name}")
+                    break
+
+            if tool_class:
+                try:
+                    tool_instance = tool_class()
+                    tools.append(tool_instance)
+                    logger.info(f"注册工具: {tool_instance.name}")
+                except Exception as e:
+                    logger.error(f"实例化工具失败 {candidate_name}: {e}")
+            else:
+                logger.warning(f"未找到工具类: {module_name} (尝试的类名: {possible_class_names})")
 
         except Exception as e:
             logger.error(f"加载工具模块失败 {module_name}: {e}")

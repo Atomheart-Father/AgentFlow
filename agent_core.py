@@ -512,20 +512,52 @@ class AgentCore:
 
         try:
             # 状态：开始规划
+            print("[DEBUG] 发送状态事件: 正在规划任务")
             yield {"type": "status", "message": "正在规划任务"}
 
-            # 执行编排
+            # 模拟规划过程的思维链
+            planning_steps = [
+                "分析用户查询意图...",
+                "制定执行计划...",
+                "准备调用相关工具...",
+                "优化执行步骤..."
+            ]
+
+            for step in planning_steps:
+                print(f"[DEBUG] 发送思维链: {step}")
+                yield {"type": "assistant_content", "content": step + " "}
+                await asyncio.sleep(0.1)
+
+            # 执行编排（暂时还是同步的）
             result = await self.orchestrator.orchestrate(user_query=user_query, context=context)
 
+            # 检查是否需要用户输入
+            if result.status == "ask_user" and result.pending_questions:
+                question = result.pending_questions[0]
+                print(f"[DEBUG] 发送 ask_user 事件: {question}")
+                yield {"type": "ask_user", "question": question, "context": "需要用户信息"}
+                return  # 等待用户输入，不要继续执行
+
             # 状态：开始执行
+            print("[DEBUG] 发送状态事件: 正在执行任务")
             yield {"type": "status", "message": "正在执行任务"}
+
+            # 模拟执行过程的思维链
+            if result.final_plan and result.final_plan.steps:
+                for i, step in enumerate(result.final_plan.steps, 1):
+                    print(f"[DEBUG] 发送工具轨迹: 执行步骤 {i}: {step.type}")
+                    yield {"type": "tool_trace", "message": f"执行步骤 {i}: {step.type}"}
+                    if hasattr(step, 'tool') and step.tool:
+                        print(f"[DEBUG] 发送工具调用: 调用工具 {step.tool}")
+                        yield {"type": "assistant_content", "content": f"\n调用工具 {step.tool}... "}
+                    await asyncio.sleep(0.1)
 
             # 处理最终结果
             final_content = ""
 
             if result.final_answer:
                 # 有明确的最终答案
-                final_content = result.final_answer
+                final_content = "\n\n" + result.final_answer
             elif result.status == "completed" and hasattr(result, 'execution_state') and result.execution_state:
                 # 任务完成但没有明确答案，从artifacts中构造有意义的响应
                 artifacts = result.execution_state.artifacts
@@ -550,23 +582,20 @@ class AgentCore:
                     response_parts.append("文件已保存到指定位置")
 
                 if response_parts:
-                    final_content = "\n\n".join(response_parts)
+                    final_content = "\n\n" + "\n\n".join(response_parts)
                 else:
-                    final_content = "任务已完成，所有步骤都已成功执行。"
+                    final_content = "\n\n任务已完成，所有步骤都已成功执行。"
             else:
                 # 其他状态（如ask_user/waiting），不向聊天气泡写入误导性文本
                 final_content = ""
 
-            # 流式输出最终内容
+            # 真·流式输出最终内容
             if final_content:
-                chunk_size = 50  # 每批50个字符
-                for i in range(0, len(final_content), chunk_size):
-                    chunk = final_content[i:i+chunk_size]
-                    yield {"type": "assistant_content", "content": chunk}
-                    # 短暂延迟模拟流式效果
-                    await asyncio.sleep(0.01)
+                print(f"[DEBUG] 发送最终内容: {final_content[:100]}...")
+                yield {"type": "assistant_content", "content": final_content}
 
             # 状态：处理完成
+            print("[DEBUG] 发送状态事件: 处理完成")
             yield {"type": "status", "message": "处理完成"}
 
         except Exception as e:
