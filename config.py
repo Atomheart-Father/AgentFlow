@@ -18,7 +18,8 @@ class Config:
             load_dotenv(env_path)
 
         # LLM配置
-        self.model_provider = os.getenv("MODEL_PROVIDER", "gemini")
+        self.model_provider = os.getenv("MODEL_PROVIDER", "deepseek")
+        self.deepseek_model = os.getenv("DEEPSEEK_MODEL", "deepseek-chat")  # deepseek-chat 或 deepseek-reasoner
         self.gemini_api_key = os.getenv("GEMINI_API_KEY", "")
         self.deepseek_api_key = os.getenv("DEEPSEEK_API_KEY", "")
         self.deepseek_base_url = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
@@ -61,6 +62,10 @@ class Config:
 
         if self.log_level not in ["INFO", "DEBUG"]:
             errors.append(f"无效的LOG_LEVEL: {self.log_level}")
+
+        # 验证DeepSeek模型选择
+        if self.model_provider == "deepseek" and self.deepseek_model not in ["deepseek-chat", "deepseek-reasoner"]:
+            errors.append(f"无效的DEEPSEEK_MODEL: {self.deepseek_model} (应为 deepseek-chat 或 deepseek-reasoner)")
 
         if errors:
             raise ValueError("配置错误: " + ", ".join(errors))

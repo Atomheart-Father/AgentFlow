@@ -9,6 +9,7 @@ from datetime import datetime
 from llm_interface import get_llm_interface, LLMResponse
 from config import get_config
 from logger import get_logger
+from tool_registry import get_tools, execute_tool, ToolError, to_openai_tools
 
 logger = get_logger()
 
@@ -19,10 +20,20 @@ class AgentCore:
     def __init__(self, llm_interface=None):
         self.config = get_config()
         self.llm = llm_interface or get_llm_interface()
+
+        # 初始化工具系统
+        if self.config.tools_enabled:
+            self.tools = get_tools()
+            logger.info(f"工具系统已加载: {len(self.tools)} 个工具")
+        else:
+            self.tools = []
+            logger.info("工具系统已禁用")
+
         logger.info("Agent核心初始化完成", extra={
             "provider": self.config.model_provider,
             "rag_enabled": self.config.rag_enabled,
             "tools_enabled": self.config.tools_enabled,
+            "tools_count": len(self.tools),
             "llm_initialized": self.llm.provider is not None
         })
 
@@ -57,22 +68,79 @@ class AgentCore:
         logger.info(f"开始处理用户输入: {user_input[:100]}{'...' if len(user_input) > 100 else ''}")
 
         try:
-            # 构建提示词
-            prompt = self._build_prompt(user_input, context)
+            # 初始化对话历史
+            messages = []
+            tool_call_trace = []
+            max_tool_calls = 2  # 最多2次工具调用
 
-            # 调用LLM（目前不使用工具）
-            llm_response = await self.llm.generate(
-                prompt=prompt,
-                tools_schema=None  # 暂时不启用工具
-            )
+            # 系统提示词
+            system_prompt = self._build_system_prompt()
+            messages.append({"role": "system", "content": system_prompt})
 
-            # 记录响应信息
-            self._log_response(llm_response, user_input)
+            # 用户输入
+            messages.append({"role": "user", "content": user_input})
+
+            # 工具调用回路
+            for tool_call_count in range(max_tool_calls + 1):
+                logger.info(f"开始第 {tool_call_count + 1} 轮对话")
+
+                # 准备工具模式
+                tools_schema = None
+                if self.tools and tool_call_count < max_tool_calls:
+                    tools_schema = to_openai_tools(self.tools)
+                    logger.debug(f"启用工具模式，共 {len(self.tools)} 个工具")
+
+                # 调用LLM（传递messages而不是prompt）
+                llm_response = await self.llm.generate(
+                    prompt="",  # 使用messages而不是prompt
+                    tools_schema=tools_schema
+                )
+
+                # 处理LLM响应
+                assistant_message = {"role": "assistant", "content": llm_response.content}
+
+                # 检查是否有工具调用
+                if llm_response.function_calls:
+                    logger.info(f"检测到 {len(llm_response.function_calls)} 个工具调用")
+
+                    # 添加assistant消息（包含工具调用）
+                    assistant_message["tool_calls"] = llm_response.function_calls
+                    messages.append(assistant_message)
+
+                    # 执行工具调用
+                    tool_results = []
+                    for tool_call in llm_response.function_calls:
+                        tool_result = await self._execute_tool_call(tool_call)
+                        tool_results.append(tool_result)
+
+                        # 添加工具结果消息
+                        tool_message = {
+                            "role": "tool",
+                            "content": str(tool_result["result"]),
+                            "tool_call_id": tool_call["id"]
+                        }
+                        messages.append(tool_message)
+
+                        # 记录工具调用轨迹
+                        tool_call_trace.append({
+                            "tool_name": tool_call["function"]["name"],
+                            "arguments": tool_call["function"]["arguments"],
+                            "result": tool_result["result"],
+                            "error": tool_result.get("error"),
+                            "execution_time": tool_result["execution_time"]
+                        })
+
+                    # 如果有工具调用，继续下一轮对话
+                    continue
+                else:
+                    # 没有工具调用，直接返回最终答案
+                    messages.append(assistant_message)
+                    break
 
             # 计算总处理时间
             total_time = (datetime.now() - start_time).total_seconds()
+            logger.info(f"处理总时间: {total_time:.2f}s")
 
-            logger.info(".2f")
             # 构建返回结果
             result = {
                 "response": llm_response.content,
@@ -82,6 +150,8 @@ class AgentCore:
                     "total_time": total_time,
                     "usage": llm_response.usage,
                     "function_calls": llm_response.function_calls,
+                    "tool_call_trace": tool_call_trace,
+                    "conversation_rounds": len([m for m in messages if m["role"] == "assistant"]),
                     "timestamp": start_time.isoformat()
                 }
             }
@@ -101,9 +171,39 @@ class AgentCore:
                 }
             }
 
+    def _build_system_prompt(self) -> str:
+        """
+        构建系统提示词（支持工具调用）
+
+        Returns:
+            系统提示词
+        """
+        base_prompt = """你是AI个人助理，可以帮助用户处理各种任务。
+
+你具备以下能力：
+1. 基础对话和问答
+2. 工具调用能力 - 你可以调用工具来获取外部信息"""
+
+        if self.tools:
+            tool_names = [tool.name for tool in self.tools]
+            base_prompt += f"\n3. 可用工具: {', '.join(tool_names)}"
+
+        base_prompt += """
+
+重要规则：
+- 如果需要外部信息（如天气、时间、搜索等），请优先调用相应工具
+- 每次只调用最少量的工具（最多2次）
+- 工具调用结果返回后，再生成最终答案
+- 对计算/检索类问题如果没有工具证据，回答要保守并声明不确定
+- 最终答案要基于工具结果，尽量结构化（列表/步骤/结论先行）
+
+请用友好的语气回答用户的问题。"""
+
+        return base_prompt
+
     def _build_prompt(self, user_input: str, context: Optional[Dict[str, Any]] = None) -> str:
         """
-        构建提示词
+        构建传统提示词（向后兼容）
 
         Args:
             user_input: 用户输入
@@ -112,10 +212,7 @@ class AgentCore:
         Returns:
             完整的提示词
         """
-        system_prompt = """你是AI个人助理，可以帮助用户处理各种任务。
-目前你只具备基本的对话能力，其他功能正在开发中。
-
-请用友好的语气回答用户的问题。"""
+        system_prompt = self._build_system_prompt()
 
         if context:
             # 如果有上下文，添加到提示词中
@@ -125,6 +222,71 @@ class AgentCore:
             prompt = f"{system_prompt}\n\n用户: {user_input}"
 
         return prompt
+
+    async def _execute_tool_call(self, tool_call: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        执行单个工具调用
+
+        Args:
+            tool_call: 工具调用信息
+
+        Returns:
+            工具执行结果
+        """
+        import time
+        start_time = time.time()
+
+        try:
+            tool_name = tool_call["function"]["name"]
+            arguments = tool_call["function"]["arguments"]
+
+            # 解析参数（如果是字符串）
+            if isinstance(arguments, str):
+                try:
+                    import json
+                    arguments = json.loads(arguments)
+                except json.JSONDecodeError:
+                    arguments = {}
+
+            logger.info(f"执行工具: {tool_name}, 参数: {arguments}")
+
+            # 执行工具
+            result = execute_tool(tool_name, self.tools, **arguments)
+
+            execution_time = time.time() - start_time
+
+            return {
+                "tool_call_id": tool_call["id"],
+                "result": result,
+                "execution_time": execution_time,
+                "success": True
+            }
+
+        except ToolError as e:
+            execution_time = time.time() - start_time
+            logger.error(f"工具执行失败: {e}")
+
+            return {
+                "tool_call_id": tool_call["id"],
+                "result": f"工具调用失败: {e.message}",
+                "error": str(e),
+                "execution_time": execution_time,
+                "success": False,
+                "retryable": e.retryable
+            }
+
+        except Exception as e:
+            execution_time = time.time() - start_time
+            logger.error(f"工具执行异常: {e}")
+
+            return {
+                "tool_call_id": tool_call["id"],
+                "result": f"工具执行异常: {str(e)}",
+                "error": str(e),
+                "execution_time": execution_time,
+                "success": False,
+                "retryable": False
+            }
 
     def _log_response(self, llm_response: LLMResponse, user_input: str):
         """

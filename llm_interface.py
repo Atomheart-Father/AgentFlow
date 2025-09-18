@@ -54,6 +54,7 @@ class GeminiProvider(LLMProvider):
         self,
         prompt: str,
         tools_schema: Optional[List[Dict[str, Any]]] = None,
+        force_json: bool = False,
         **kwargs
     ) -> LLMResponse:
         start_time = time.time()
@@ -120,7 +121,7 @@ class GeminiProvider(LLMProvider):
 class DeepSeekProvider(LLMProvider):
     """DeepSeek提供者"""
 
-    def __init__(self, api_key: str, base_url: str = "https://api.deepseek.com", model: str = "deepseek-reasoner"):
+    def __init__(self, api_key: str, base_url: str = "https://api.deepseek.com", model: str = "deepseek-chat"):
         # 使用异步客户端
         from openai import AsyncOpenAI
         self.client = AsyncOpenAI(
@@ -133,6 +134,7 @@ class DeepSeekProvider(LLMProvider):
         self,
         prompt: str,
         tools_schema: Optional[List[Dict[str, Any]]] = None,
+        force_json: bool = False,
         **kwargs
     ) -> LLMResponse:
         start_time = time.time()
@@ -146,6 +148,16 @@ class DeepSeekProvider(LLMProvider):
             if tools_schema:
                 tool_params["tools"] = tools_schema
                 tool_params["tool_choice"] = "auto"
+
+            # 处理JSON模式
+            if force_json:
+                tool_params["response_format"] = {"type": "json_object"}
+                # 为JSON模式添加系统提示
+                if not messages or messages[0]["role"] != "system":
+                    messages.insert(0, {
+                        "role": "system",
+                        "content": "You must respond with valid JSON only."
+                    })
 
             # 生成响应
             response = await self.client.chat.completions.create(
@@ -218,7 +230,7 @@ class LLMInterface:
             return DeepSeekProvider(
                 api_key=self.config.deepseek_api_key,
                 base_url=self.config.deepseek_base_url,
-                model="deepseek-chat"
+                model=self.config.deepseek_model
             )
         else:
             raise ValueError(f"不支持的提供者: {self.config.model_provider}")
@@ -234,6 +246,7 @@ class LLMInterface:
         self,
         prompt: str,
         tools_schema: Optional[List[Dict[str, Any]]] = None,
+        force_json: bool = False,
         **kwargs
     ) -> LLMResponse:
         """
@@ -242,6 +255,7 @@ class LLMInterface:
         Args:
             prompt: 用户提示
             tools_schema: 工具模式（可选）
+            force_json: 强制JSON输出模式（DeepSeek专用）
             **kwargs: 其他参数
 
         Returns:
@@ -263,6 +277,7 @@ class LLMInterface:
                     return await self.provider.generate(
                         prompt=prompt,
                         tools_schema=tools_schema,
+                        force_json=force_json,
                         temperature=self.config.temperature,
                         max_tokens=self.config.max_tokens,
                         **kwargs

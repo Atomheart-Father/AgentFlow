@@ -26,7 +26,7 @@ class ChatUI:
         # 创建带有LLM接口的Agent核心实例
         self.agent = create_agent_core_with_llm()
 
-    def process_user_message(self, user_input: str, chat_history) -> Tuple[str, List[Tuple[str, str]]]:
+    def process_user_message(self, user_input: str, chat_history) -> Tuple[str, List[Tuple[str, str]], str]:
         """
         处理用户消息
 
@@ -35,7 +35,7 @@ class ChatUI:
             chat_history: 聊天历史
 
         Returns:
-            清空的用户输入和更新后的聊天历史
+            清空的用户输入、更新后的聊天历史、工具轨迹文本
         """
         if not user_input.strip():
             return "", chat_history
@@ -59,6 +59,9 @@ class ChatUI:
             # 记录统计信息
             self._log_statistics(metadata)
 
+            # 获取工具轨迹
+            tool_trace_text = self.format_tool_trace(metadata.get("tool_call_trace", []))
+
             logger.info("用户消息处理完成")
 
         except Exception as e:
@@ -66,8 +69,9 @@ class ChatUI:
             logger.error(error_msg, exc_info=True)
             assistant_response = "抱歉，处理您的请求时出现了错误，请稍后重试。"
             chat_history.append((user_input, assistant_response))
+            tool_trace_text = "❌ 处理过程中发生错误"
 
-        return "", chat_history
+        return "", chat_history, tool_trace_text
 
     def _log_statistics(self, metadata: Dict[str, Any]):
         """记录统计信息"""
@@ -83,21 +87,42 @@ class ChatUI:
             if "completion_tokens" in usage:
                 logger.info(f"输出Token: {usage['completion_tokens']}")
 
-    def clear_history(self, chat_history) -> Tuple[List[Tuple[str, str]], str]:
+    def clear_history(self, chat_history) -> Tuple[List[Tuple[str, str]], str, str]:
         """清除聊天历史"""
         logger.info("清除聊天历史")
         self.chat_history = []
         self.metadata_history = []
-        return [], "聊天历史已清除"
+        return [], "聊天历史已清除", "工具轨迹已清除"
 
     def get_system_info(self) -> str:
         """获取系统信息"""
         provider_info = f"当前模型提供商: {self.config.model_provider}"
+        if hasattr(self.config, 'deepseek_model'):
+            provider_info += f" ({self.config.deepseek_model})"
         rag_status = f"RAG功能: {'启用' if self.config.rag_enabled else '禁用'}"
-        tools_status = f"工具功能: {'启用' if self.config.tools_enabled else '禁用'}"
+        tools_status = f"工具功能: {'启用' if self.config.tools_enabled else '禁用'} ({len(self.agent.tools) if hasattr(self, 'agent') else 0}个工具)"
         log_level = f"日志级别: {self.config.log_level}"
 
         return f"{provider_info}\n{rag_status}\n{tools_status}\n{log_level}"
+
+    def format_tool_trace(self, tool_trace: list) -> str:
+        """格式化工具调用轨迹"""
+        if not tool_trace:
+            return "本次对话未使用任何工具"
+
+        trace_lines = ["🛠️ 工具调用轨迹:"]
+        for i, trace in enumerate(tool_trace, 1):
+            tool_name = trace.get("tool_name", "未知工具")
+            execution_time = trace.get("execution_time", 0)
+            success = not trace.get("error")
+
+            status_icon = "✅" if success else "❌"
+            trace_lines.append(f"{i}. {status_icon} {tool_name} ({execution_time:.2f}s)")
+
+            if trace.get("error"):
+                trace_lines.append(f"   错误: {trace['error'][:100]}...")
+
+        return "\n".join(trace_lines)
 
 
 def create_gradio_interface() -> gr.Blocks:
@@ -138,6 +163,16 @@ def create_gradio_interface() -> gr.Blocks:
             container=True
         )
 
+        # 工具轨迹面板
+        with gr.Accordion("🛠️ 工具调用轨迹", open=False):
+            tool_trace_display = gr.Textbox(
+                value="本次对话未使用任何工具",
+                interactive=False,
+                lines=8,
+                label="工具调用详情",
+                show_label=False
+            )
+
         # 输入框
         with gr.Row():
             user_input = gr.Textbox(
@@ -153,19 +188,19 @@ def create_gradio_interface() -> gr.Blocks:
         submit_btn.click(
             ui.process_user_message,
             inputs=[user_input, chatbot],
-            outputs=[user_input, chatbot]
+            outputs=[user_input, chatbot, tool_trace_display]
         )
 
         user_input.submit(
             ui.process_user_message,
             inputs=[user_input, chatbot],
-            outputs=[user_input, chatbot]
+            outputs=[user_input, chatbot, tool_trace_display]
         )
 
         clear_btn.click(
             ui.clear_history,
             inputs=[chatbot],
-            outputs=[chatbot, user_input]
+            outputs=[chatbot, user_input, tool_trace_display]
         )
 
         # 页脚信息
