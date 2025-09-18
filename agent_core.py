@@ -511,6 +511,9 @@ class AgentCore:
             return
 
         try:
+            # 导入time模块
+            import time
+
             # 创建会话ID
             session_id = f"session_{int(time.time())}_{hash(user_query) % 10000}"
 
