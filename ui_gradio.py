@@ -231,6 +231,24 @@ class ChatUI:
                 if assistant_content and not tool_trace_text.startswith("❌"):
                     tool_trace_text = "✅ 处理完成"
 
+                    # 检查是否有文件保存信息需要显示
+                    # 这里可以通过检查orchestrator的结果来获取文件信息
+                    # 由于流式处理，我们需要在完成后检查
+                    try:
+                        # 尝试从session中获取最后的结果来检查文件信息
+                        from orchestrator import get_session
+                        session = get_session(self.session_id)
+                        if session.active_task and session.active_task.result:
+                            result = session.active_task.result
+                            if hasattr(result, 'execution_state') and result.execution_state:
+                                file_info = self._extract_file_info(result.execution_state.artifacts)
+                                if file_info:
+                                    # 在最后添加文件信息
+                                    assistant_content += f"\n\n📁 **文件已保存**\n{file_info}"
+                                    chat_history[-1] = (user_input, assistant_content)
+                    except Exception as e:
+                        logger.warning(f"获取文件信息失败: {e}")
+
                 return None, chat_history, tool_trace_text
 
         except Exception as e:

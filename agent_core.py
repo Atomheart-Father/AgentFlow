@@ -520,23 +520,51 @@ class AgentCore:
             # 状态：开始执行
             yield {"type": "status", "message": "正在执行任务"}
 
-            # 如果有最终答案，作为assistant_content分批发送
+            # 处理最终结果
+            final_content = ""
+
             if result.final_answer:
-                # 模拟流式输出，分批发送内容到聊天气泡
-                content = result.final_answer
+                # 有明确的最终答案
+                final_content = result.final_answer
+            elif result.status == "completed" and hasattr(result, 'execution_state') and result.execution_state:
+                # 任务完成但没有明确答案，从artifacts中构造有意义的响应
+                artifacts = result.execution_state.artifacts
+                response_parts = []
+
+                # 提取有用的信息
+                if "weather_data" in artifacts:
+                    weather = artifacts["weather_data"]
+                    if hasattr(weather, 'data') and weather.data:
+                        response_parts.append(f"天气信息: {weather.data}")
+                    elif isinstance(weather, dict):
+                        response_parts.append(f"天气信息: {weather}")
+
+                if "commute_tips" in artifacts:
+                    tips = artifacts["commute_tips"]
+                    if isinstance(tips, str):
+                        response_parts.append(f"通勤建议: {tips}")
+                    elif isinstance(tips, list):
+                        response_parts.append("通勤建议:\n" + "\n".join(f"- {tip}" for tip in tips))
+
+                if "file_path" in artifacts:
+                    response_parts.append("文件已保存到指定位置")
+
+                if response_parts:
+                    final_content = "\n\n".join(response_parts)
+                else:
+                    final_content = "任务已完成，所有步骤都已成功执行。"
+            else:
+                # 其他状态
+                final_content = f"处理完成 (状态: {result.status})"
+
+            # 流式输出最终内容
+            if final_content:
                 chunk_size = 50  # 每批50个字符
-                for i in range(0, len(content), chunk_size):
-                    chunk = content[i:i+chunk_size]
+                for i in range(0, len(final_content), chunk_size):
+                    chunk = final_content[i:i+chunk_size]
                     yield {"type": "assistant_content", "content": chunk}
                     # 短暂延迟模拟流式效果
                     await asyncio.sleep(0.01)
-
-                # 检查是否有文件保存信息，作为assistant_content补充
-                if hasattr(result, 'execution_state') and result.execution_state:
-                    # 这里可以检查文件保存状态并添加到assistant_content
-                    pass
-            else:
-                yield {"type": "assistant_content", "content": "任务已完成"}
 
             # 状态：处理完成
             yield {"type": "status", "message": "处理完成"}

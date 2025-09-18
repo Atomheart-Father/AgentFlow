@@ -489,6 +489,11 @@ class Orchestrator:
         finally:
             result.total_time = time.time() - start_time
 
+            # 保存结果到active_task（如果存在）
+            if active_task:
+                active_task.result = result
+                active_task.update_activity()
+
             # 结束备现身复盘会话
             final_result = {
                 "status": result.status,
