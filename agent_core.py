@@ -255,8 +255,17 @@ IMPORTANT: Always call the appropriate tool when external information is needed.
         start_time = time.time()
 
         try:
-            tool_name = tool_call["function"]["name"]
-            arguments = tool_call["function"]["arguments"]
+            # 处理OpenAI工具调用对象
+            if hasattr(tool_call, 'function'):
+                # OpenAI工具调用对象
+                tool_name = tool_call.function.name
+                arguments = tool_call.function.arguments
+                tool_call_id = tool_call.id
+            else:
+                # 字典格式（向后兼容）
+                tool_name = tool_call.get("function", {}).get("name", "")
+                arguments = tool_call.get("function", {}).get("arguments", "{}")
+                tool_call_id = tool_call.get("id", "")
 
             # 解析参数（如果是字符串）
             if isinstance(arguments, str):
@@ -274,7 +283,7 @@ IMPORTANT: Always call the appropriate tool when external information is needed.
             execution_time = time.time() - start_time
 
             return {
-                "tool_call_id": tool_call["id"],
+                "tool_call_id": tool_call_id,
                 "result": result,
                 "execution_time": execution_time,
                 "success": True
@@ -284,8 +293,14 @@ IMPORTANT: Always call the appropriate tool when external information is needed.
             execution_time = time.time() - start_time
             logger.error(f"工具执行失败: {e}")
 
+            # 获取tool_call_id
+            if hasattr(tool_call, 'id'):
+                tool_call_id = tool_call.id
+            else:
+                tool_call_id = tool_call.get("id", "")
+
             return {
-                "tool_call_id": tool_call["id"],
+                "tool_call_id": tool_call_id,
                 "result": f"工具调用失败: {e.message}",
                 "error": str(e),
                 "execution_time": execution_time,
@@ -297,8 +312,14 @@ IMPORTANT: Always call the appropriate tool when external information is needed.
             execution_time = time.time() - start_time
             logger.error(f"工具执行异常: {e}")
 
+            # 获取tool_call_id
+            if hasattr(tool_call, 'id'):
+                tool_call_id = tool_call.id
+            else:
+                tool_call_id = tool_call.get("id", "")
+
             return {
-                "tool_call_id": tool_call["id"],
+                "tool_call_id": tool_call_id,
                 "result": f"工具执行异常: {str(e)}",
                 "error": str(e),
                 "execution_time": execution_time,
