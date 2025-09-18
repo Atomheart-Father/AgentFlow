@@ -228,10 +228,10 @@ class Orchestrator:
             # 检查是否有活跃任务
             if session.active_task and session.active_task.is_active():
                 # 继续现有任务
-                return self._continue_task(user_query, session)
+                return await self._continue_task(user_query, session)
             else:
                 # 开始新任务
-                return self._start_new_task(user_query, session, context)
+                return await self._start_new_task(user_query, session, context)
 
     def _is_new_task_request(self, user_query: str) -> bool:
         """检查是否是新任务请求"""
@@ -251,16 +251,16 @@ class Orchestrator:
         query_lower = user_query.lower().strip()
         return any(keyword in query_lower for keyword in termination_keywords)
 
-    def _start_new_task(self, user_query: str, session: SessionState, context: Dict[str, Any] = None) -> OrchestratorResult:
+    async def _start_new_task(self, user_query: str, session: SessionState, context: Dict[str, Any] = None) -> OrchestratorResult:
         """开始新任务"""
         session.start_new_task()
-        return self.orchestrate(user_query, context, session.active_task)
+        return await self.orchestrate(user_query, context, session.active_task)
 
-    def _continue_task(self, user_query: str, session: SessionState) -> OrchestratorResult:
+    async def _continue_task(self, user_query: str, session: SessionState) -> OrchestratorResult:
         """继续现有任务"""
         if not session.active_task:
             # 不应该发生的情况
-            return self._start_new_task(user_query, session)
+            return await self._start_new_task(user_query, session)
 
         # 检查是否是任务终止
         if self._is_task_termination(user_query):
@@ -272,7 +272,7 @@ class Orchestrator:
 
         # 继续现有任务
         session.active_task.update_activity()
-        return self.orchestrate(user_query, None, session.active_task)
+        return await self.orchestrate(user_query, None, session.active_task)
 
     async def _resume_with_answer(self, user_answer: str, session: SessionState) -> OrchestratorResult:
         """使用用户答案恢复任务"""
