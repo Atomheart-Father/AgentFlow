@@ -140,14 +140,19 @@ class Planner:
 
 规划规则：
 1. 文件路径规划：写文件前必须先用path_planner规划正确路径（只接受filename和file_type参数）
-2. 主观上下文用ask_user：城市/国别、OS/路径、个人偏好/预算、私有文件位置
-3. 客观信息用web_search：天气、新闻、价格、开放时间、官方事实
-4. 组合策略：可先web_search给候选，再ask_user确认；或ask_user一次后超时转web_search
-5. 硬约束：单轮最多1个ask_user，web_search≤2次
+2. 日期时间处理：当需要当前日期/时间时，必须使用time.now工具获取；遇到相对日期（如'明天'）时，先调用time.now再计算
+3. 工具优先级：优先使用工具获取信息，其次利用已有上下文，最后才询问用户
+4. 主观上下文用ask_user：城市/国别、个人偏好/预算、私有文件位置（明确未知的信息）
+5. 客观信息用web_search：天气、新闻、价格、开放时间、官方事实
+6. 组合策略：可先web_search给候选，再ask_user确认；或ask_user一次后超时转web_search
+7. 硬约束：单轮最多1个ask_user，web_search≤2次
 
 步骤类型：tool_call, summarize, write_file, ask_user
 
-重要：所有文件路径必须通过path_planner工具转换为系统路径后再写入！path_planner只接受filename和file_type参数！
+重要：
+- 所有文件路径必须通过path_planner工具转换为系统路径后再写入！
+- 永远不要直接询问日期，使用time.now工具！
+- path_planner只接受filename和file_type参数！
 
 只输出JSON格式，不要任何解释："""
 

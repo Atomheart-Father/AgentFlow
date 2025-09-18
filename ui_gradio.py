@@ -125,65 +125,13 @@ class ChatUI:
 
         logger.info(f"收到用户输入 (会话{self.session_id}): {user_input[:100]}{'...' if len(user_input) > 100 else ''}")
 
+        # 立即显示用户输入
+        chat_history.append((user_input, ""))
+
         try:
             if self.use_m3_mode and self.orchestrator:
-                # 使用M3编排器的会话状态管理
-                result = await self.orchestrator.process_message(user_input, self.session_id)
-
-                # 处理结果
-                if result.status == "waiting_for_user":
-                    # 等待用户回答问题 - 设置session的pending_ask状态
-                    from orchestrator import get_session
-                    session = get_session(self.session_id)
-
-                    if result.pending_questions:
-                        question = result.pending_questions[0]  # 取第一个问题
-                        # 推断期望的答案类型
-                        expects = "user_input"
-                        if "城市" in question or "city" in question.lower():
-                            expects = "city"
-                        elif "日期" in question or "date" in question.lower():
-                            expects = "date"
-
-                        session.set_pending_ask(question, expects)
-
-                        message = f"🤔 {question}\n\n请在输入框中直接回复，我将继续为您处理请求。"
-                        chat_history.append((user_input, message))
-                        tool_trace_text = f"🕐 等待用户回答问题..."
-                    else:
-                        chat_history.append((user_input, "等待用户输入..."))
-                        tool_trace_text = "🕐 等待用户回答"
-                elif result.status == "terminated":
-                    # 任务已结束
-                    chat_history.append((user_input, result.final_answer or "任务已结束"))
-                    tool_trace_text = "✅ 任务已结束"
-                elif result.final_answer:
-                    # 有最终答案
-                    final_message = result.final_answer
-
-                    # 检查是否有文件保存信息
-                    if hasattr(result, 'execution_state') and result.execution_state:
-                        artifacts = result.execution_state.artifacts
-                        file_info = self._extract_file_info(artifacts)
-                        if file_info:
-                            final_message += f"\n\n📁 **文件已保存**\n{file_info}"
-
-                    chat_history.append((user_input, final_message))
-                    tool_trace_text = self._generate_tool_trace(result)
-                else:
-                    # 其他状态
-                    status_msg = f"处理完成 (状态: {result.status})"
-
-                    # 即使失败，也尝试显示文件信息
-                    if hasattr(result, 'execution_state') and result.execution_state:
-                        artifacts = result.execution_state.artifacts
-                        file_info = self._extract_file_info(artifacts)
-                        if file_info:
-                            status_msg += f"\n\n📁 **文件已保存**\n{file_info}"
-
-                    chat_history.append((user_input, status_msg))
-                    tool_trace_text = f"状态: {result.status}"
-
+                # 使用M3编排器的会话状态管理 - 流式处理
+                return await self._process_m3_stream(user_input, chat_history)
             else:
                 # 使用传统模式（原有逻辑）
                 return await self._process_traditional(user_input, chat_history)
@@ -192,10 +140,63 @@ class ChatUI:
             error_msg = f"处理消息时发生错误: {str(e)}"
             logger.error(error_msg, exc_info=True)
             assistant_response = "抱歉，处理您的请求时出现了错误，请稍后重试。"
-            chat_history.append((user_input, assistant_response))
+            chat_history[-1] = (user_input, assistant_response)
             tool_trace_text = "❌ 处理过程中发生错误"
 
         # 支持多轮对话，不清空输入框
+        return None, chat_history, tool_trace_text
+
+    async def _process_m3_stream(self, user_input: str, chat_history) -> Tuple[str, List[Tuple[str, str]], str]:
+        """M3模式流式处理"""
+        tool_trace_text = ""
+
+        try:
+            # 检查会话状态，处理pending_ask
+            from orchestrator import get_session
+            session = get_session(self.session_id)
+
+            if session.has_pending_ask():
+                # 这是对之前问题的回答
+                logger.info("检测到pending_ask，使用用户输入作为回答")
+                result = await self.orchestrator.process_message(user_input, self.session_id)
+            else:
+                # 正常处理 - 使用AgentCore的流式处理
+                full_response = ""
+                current_status = ""
+
+                async for chunk in self.agent._process_with_m3_stream(user_input, context={"session_id": self.session_id}):
+                    if chunk.get("type") == "status":
+                        current_status = chunk["message"]
+                        # 更新工具轨迹显示当前状态
+                        tool_trace_text = f"🔄 {current_status}"
+                        # 同时更新聊天显示状态
+                        if not full_response:
+                            chat_history[-1] = (user_input, f"🔄 {current_status}...")
+                        else:
+                            chat_history[-1] = (user_input, f"{full_response}\n\n🔄 {current_status}...")
+
+                    elif chunk.get("type") == "content":
+                        # 累积内容
+                        full_response += chunk["content"]
+                        chat_history[-1] = (user_input, full_response)
+
+                    elif chunk.get("type") == "error":
+                        error_msg = f"处理失败: {chunk['message']}"
+                        chat_history[-1] = (user_input, error_msg)
+                        tool_trace_text = f"❌ {chunk['message']}"
+                        break
+
+                # 如果处理成功，生成最终的工具轨迹
+                if full_response and not tool_trace_text.startswith("❌"):
+                    tool_trace_text = "✅ 处理完成"
+
+                return None, chat_history, tool_trace_text
+
+        except Exception as e:
+            logger.error(f"M3流式处理失败: {e}")
+            chat_history[-1] = (user_input, f"处理失败: {str(e)}")
+            tool_trace_text = f"❌ 处理失败: {str(e)}"
+
         return None, chat_history, tool_trace_text
 
     async def _process_traditional(self, user_input: str, chat_history) -> Tuple[str, List[Tuple[str, str]], str]:
