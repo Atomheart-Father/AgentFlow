@@ -56,7 +56,7 @@ class Config:
         self.max_tool_calls_per_act = int(os.getenv("MAX_TOOL_CALLS_PER_ACT", "3"))
         self.max_total_tool_calls = int(os.getenv("MAX_TOTAL_TOOL_CALLS", "6"))
         self.max_plan_iters = int(os.getenv("MAX_PLAN_ITERS", "2"))
-        self.max_latency_ms = int(os.getenv("MAX_LATENCY_MS", "20000"))
+        self.max_latency_ms = int(os.getenv("MAX_LATENCY_MS", "60000"))
         self.max_tokens_per_stage = int(os.getenv("MAX_TOKENS_PER_STAGE", "4000"))
 
     def validate(self, require_api_keys=True):

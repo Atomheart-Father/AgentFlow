@@ -159,11 +159,29 @@ class ChatUI:
                     tool_trace_text = "✅ 任务已结束"
                 elif result.final_answer:
                     # 有最终答案
-                    chat_history.append((user_input, result.final_answer))
+                    final_message = result.final_answer
+
+                    # 检查是否有文件保存信息
+                    if hasattr(result, 'execution_state') and result.execution_state:
+                        artifacts = result.execution_state.artifacts
+                        file_info = self._extract_file_info(artifacts)
+                        if file_info:
+                            final_message += f"\n\n📁 **文件已保存**\n{file_info}"
+
+                    chat_history.append((user_input, final_message))
                     tool_trace_text = self._generate_tool_trace(result)
                 else:
                     # 其他状态
-                    chat_history.append((user_input, f"处理完成 (状态: {result.status})"))
+                    status_msg = f"处理完成 (状态: {result.status})"
+
+                    # 即使失败，也尝试显示文件信息
+                    if hasattr(result, 'execution_state') and result.execution_state:
+                        artifacts = result.execution_state.artifacts
+                        file_info = self._extract_file_info(artifacts)
+                        if file_info:
+                            status_msg += f"\n\n📁 **文件已保存**\n{file_info}"
+
+                    chat_history.append((user_input, status_msg))
                     tool_trace_text = f"状态: {result.status}"
 
             else:
@@ -620,6 +638,43 @@ class ChatUI:
             return "本次对话未使用任何工具"
 
         return "\n".join(trace_lines)
+
+    def _extract_file_info(self, artifacts: Dict[str, Any]) -> str:
+        """从artifacts中提取文件保存信息"""
+        file_info_parts = []
+
+        for key, value in artifacts.items():
+            if isinstance(value, dict) and 'ok' in value and value.get('ok'):
+                # StandardToolResult格式
+                meta = value.get('meta', {})
+                if meta.get('source') == 'fs_write':
+                    # 文件写入工具的结果
+                    data = value.get('data', {})
+                    if data and 'path_abs' in data:
+                        path_abs = data['path_abs']
+                        bytes_written = data.get('bytes', 0)
+
+                        # 尝试转换为用户友好的路径
+                        try:
+                            from pathlib import Path
+                            path_obj = Path(path_abs)
+                            home = Path.home()
+
+                            # 相对于用户主目录的路径
+                            try:
+                                relative_path = path_obj.relative_to(home)
+                                display_path = f"~/{relative_path}"
+                            except ValueError:
+                                display_path = str(path_abs)
+
+                        except Exception:
+                            display_path = str(path_abs)
+
+                        file_info_parts.append(f"📄 {display_path}")
+                        if bytes_written > 0:
+                            file_info_parts.append(f"   大小: {bytes_written} 字节")
+
+        return "\n".join(file_info_parts) if file_info_parts else ""
 
 
 def create_gradio_interface(ui: ChatUI = None) -> gr.Blocks:

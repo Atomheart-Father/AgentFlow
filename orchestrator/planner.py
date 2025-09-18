@@ -133,17 +133,21 @@ class Planner:
 - calendar_read: 查看日程 {"date": "YYYY-MM-DD"}
 - file_read: 读取文件 {"file_path": "路径"}
 - fs_write: 写入文件 {"path": "路径", "content": "内容"}
+- path_planner: 规划文件路径 {"description": "桌面上的报告文件", "filename": "report", "file_type": "md"}
 - ask_user: 询问用户 {"question": "问题"}
 - math_calc: 数学计算 {"expression": "表达式"}
 - web_search: 网络搜索 {"query": "搜索词", "max_results": 5}
 
-决策规则：
-1. 主观上下文用ask_user：城市/国别、OS/路径、个人偏好/预算、私有文件位置
-2. 客观信息用web_search：新闻、价格、开放时间、官方事实
-3. 组合策略：可先web_search给候选，再ask_user确认；或ask_user一次后超时转web_search
-4. 硬约束：单轮最多1个ask_user，web_search≤2次
+规划规则：
+1. 文件路径规划：写文件前必须先用path_planner规划正确路径
+2. 主观上下文用ask_user：城市/国别、OS/路径、个人偏好/预算、私有文件位置
+3. 客观信息用web_search：天气、新闻、价格、开放时间、官方事实
+4. 组合策略：可先web_search给候选，再ask_user确认；或ask_user一次后超时转web_search
+5. 硬约束：单轮最多1个ask_user，web_search≤2次
 
 步骤类型：tool_call, summarize, write_file, ask_user
+
+重要：所有文件路径必须通过path_planner工具转换为系统路径后再写入！
 
 只输出JSON格式，不要任何解释："""
 
