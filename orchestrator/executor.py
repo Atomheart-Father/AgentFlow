@@ -193,6 +193,10 @@ class Executor:
             await self._execute_ask_user(step, interpolated_inputs, state)
             return 0
 
+        elif step.type == StepType.WEB_SEARCH:
+            await self._execute_web_search(step, interpolated_inputs, state)
+            return 1  # 网络搜索算作一次工具调用
+
         else:
             raise ValueError(f"不支持的步骤类型: {step.type}")
 
@@ -473,6 +477,13 @@ class Executor:
 
         state.set_artifact("ask_user_pending", ask_user_pending)
         logger.info(f"设置ask_user_pending状态，等待用户回答问题: {inputs.get('question', '')}")
+
+    async def _execute_web_search(self, step: PlanStep, inputs: Dict[str, Any], state: ExecutionState):
+        """执行网络搜索步骤"""
+        # 使用web_search工具
+        result = execute_tool("web_search", self.tools, **inputs)
+        state.set_artifact(step.output_key, result)
+        logger.info(f"网络搜索步骤 {step.id} 完成，输出到: {step.output_key}")
 
     # _execute_ask_user已移除，现在通过ask_user工具处理
 

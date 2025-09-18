@@ -144,6 +144,13 @@ class Planner:
 - math_calc: 数学计算 {"expression": "表达式"}
 - web_search: 网络搜索 {"query": "搜索词", "max_results": 5}
 
+步骤类型：
+- tool_call: 调用工具（time_now, weather_get, calendar_read, file_read, fs_write, math_calc）
+- web_search: 执行网络搜索（使用web_search工具）
+- summarize: 汇总和分析数据
+- ask_user: 询问用户输入
+- write_file: 写入文件（使用fs_write工具）
+
 强化硬规则：
 1. 【仅JSON输出】：禁止任何自然语言和多余字段，只输出JSON格式结果
 2. 【失败重试】：解析失败时自动重试1次

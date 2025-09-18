@@ -611,11 +611,24 @@ class AgentCore:
             # 模拟执行过程的思维链
             if result.final_plan and result.final_plan.steps:
                 for i, step in enumerate(result.final_plan.steps, 1):
-                    print(f"[DEBUG] 发送工具轨迹: 执行步骤 {i}: {step.type}")
-                    yield {"type": "tool_trace", "message": f"执行步骤 {i}: {step.type}"}
-                    if hasattr(step, 'tool') and step.tool:
+                    step_type_str = step.type.value if hasattr(step.type, 'value') else str(step.type)
+                    print(f"[DEBUG] 发送工具轨迹: 执行步骤 {i}: {step_type_str}")
+                    yield {"type": "tool_trace", "message": f"执行步骤 {i}: {step_type_str}"}
+
+                    # 根据步骤类型显示不同的执行信息
+                    if step.type == "tool_call" and hasattr(step, 'tool') and step.tool:
                         print(f"[DEBUG] 发送工具调用: 调用工具 {step.tool}")
                         yield {"type": "assistant_content", "content": f"\n调用工具 {step.tool}... "}
+                    elif step.type == "web_search":
+                        print(f"[DEBUG] 发送网络搜索: 搜索 {step.inputs.get('query', '')}")
+                        yield {"type": "assistant_content", "content": f"\n执行网络搜索... "}
+                    elif step.type == "ask_user":
+                        print(f"[DEBUG] 发送用户询问: {step.inputs.get('question', '')}")
+                        yield {"type": "assistant_content", "content": f"\n需要用户信息... "}
+                    elif step.type == "summarize":
+                        print(f"[DEBUG] 发送数据汇总: {step.expect}")
+                        yield {"type": "assistant_content", "content": f"\n汇总分析数据... "}
+
                     await asyncio.sleep(0.1)
 
             # 处理最终结果
