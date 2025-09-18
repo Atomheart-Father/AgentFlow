@@ -10,6 +10,7 @@ from datetime import datetime
 from llm_interface import create_llm_interface_with_keys
 from schemas.orchestrator import PlannerOutput, validate_planner_output, StepType
 from config import get_config
+from telemetry import get_telemetry_logger, TelemetryStage, TelemetryEvent
 from logger import get_logger
 
 logger = get_logger()
@@ -36,6 +37,7 @@ class Planner:
         self.max_retries = 2
         self.max_tokens = config.max_tokens_per_stage
         self.temperature = config.planner_temperature
+        self.telemetry = get_telemetry_logger()
 
     async def create_plan(self, user_query: str, context: Dict[str, Any] = None) -> PlannerOutput:
         """
@@ -77,11 +79,33 @@ class Planner:
                 # 解析和验证计划（严格JSON模式）
                 validated_plan = validate_planner_output(response.content)
 
+                # 检查规划质量
+                if len(validated_plan.steps) == 0:
+                    # Telemetry: 空计划
+                    self.telemetry.log_event(
+                        stage=TelemetryStage.PLAN,
+                        event=TelemetryEvent.PLAN_EMPTY_OR_USELESS,
+                        user_query=user_query,
+                        context={"reason": "empty_plan", "raw_response": response.content[:500]},
+                        plan_excerpt={"goal": validated_plan.goal, "steps_count": 0},
+                        model={"planner": self.llm.config.deepseek_model}
+                    )
+
                 logger.info(f"✅ 规划成功，共 {len(validated_plan.steps)} 个步骤")
                 return validated_plan
 
             except ValueError as e:
                 logger.warning(f"计划验证失败 (尝试 {attempt + 1}): {e}")
+
+                # Telemetry: 记录规划JSON验证失败
+                self.telemetry.log_event(
+                    stage=TelemetryStage.PLAN,
+                    event=TelemetryEvent.PLANNER_NON_JSON,
+                    user_query=user_query,
+                    context={"error": str(e), "attempt": attempt + 1, "raw_response": response.content[:500]},
+                    model={"planner": self.llm.config.deepseek_model}
+                )
+
                 if attempt < self.max_retries:
                     continue
                 else:
@@ -111,6 +135,13 @@ class Planner:
 - fs_write: 写入文件 {"path": "路径", "content": "内容"}
 - ask_user: 询问用户 {"question": "问题"}
 - math_calc: 数学计算 {"expression": "表达式"}
+- web_search: 网络搜索 {"query": "搜索词", "max_results": 5}
+
+决策规则：
+1. 主观上下文用ask_user：城市/国别、OS/路径、个人偏好/预算、私有文件位置
+2. 客观信息用web_search：新闻、价格、开放时间、官方事实
+3. 组合策略：可先web_search给候选，再ask_user确认；或ask_user一次后超时转web_search
+4. 硬约束：单轮最多1个ask_user，web_search≤2次
 
 步骤类型：tool_call, summarize, write_file, ask_user
 

@@ -13,6 +13,7 @@ from .planner import get_planner
 from .executor import get_executor, ExecutionState
 from .judge import get_judge
 from config import get_config
+from telemetry import get_telemetry_logger, TelemetryStage, TelemetryEvent
 from .post_mortem_logger import get_post_mortem_logger
 from logger import get_logger
 
@@ -84,6 +85,7 @@ class Orchestrator:
         self.executor = get_executor()
         self.judge = get_judge()
         self.post_mortem_logger = get_post_mortem_logger()
+        self.telemetry = get_telemetry_logger()
 
         logger.info(f"编排器初始化完成: max_plan_iters={self.max_plan_iters}, max_total_tool_calls={self.max_total_tool_calls}")
 
@@ -125,12 +127,32 @@ class Orchestrator:
 
                 if result.total_tool_calls >= self.max_total_tool_calls:
                     logger.warning(f"达到总工具调用上限 {self.max_total_tool_calls}")
+
+                    # Telemetry: 预算超限
+                    self.telemetry.log_event(
+                        stage=TelemetryStage.ACT,
+                        event=TelemetryEvent.BUDGET_EXCEEDED,
+                        user_query=user_query,
+                        context={"reason": "total_tool_calls_exceeded", "current": result.total_tool_calls, "limit": self.max_total_tool_calls},
+                        limits={"tool_calls_used": result.total_tool_calls, "budget": {"max_calls": self.max_total_tool_calls}}
+                    )
+
                     current_state = OrchestratorState.FAILED
                     result.error_message = f"达到总工具调用上限 ({self.max_total_tool_calls})"
                     break
 
                 if plan_iter >= self.max_plan_iters:
                     logger.warning(f"达到最大规划迭代次数 {self.max_plan_iters}")
+
+                    # Telemetry: JUDGE_LOOP - 反复REPLAN超阈值
+                    self.telemetry.log_event(
+                        stage=TelemetryStage.JUDGE,
+                        event=TelemetryEvent.JUDGE_LOOP,
+                        user_query=user_query,
+                        context={"reason": "max_plan_iterations_exceeded", "iterations": plan_iter, "limit": self.max_plan_iters},
+                        plan_excerpt={"iterations": plan_iter}
+                    )
+
                     current_state = OrchestratorState.FAILED
                     result.error_message = f"达到最大规划迭代次数 ({self.max_plan_iters})"
                     break

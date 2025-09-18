@@ -10,6 +10,8 @@ from datetime import datetime
 from llm_interface import create_llm_interface_with_keys
 from schemas.orchestrator import PlannerOutput, PlanStep, StepType
 from tool_registry import get_tools, execute_tool, ToolError
+from schemas.tool_result import StandardToolResult
+from telemetry import get_telemetry_logger, TelemetryStage, TelemetryEvent
 from logger import get_logger
 
 logger = get_logger()
@@ -84,6 +86,7 @@ class Executor:
 
         self.tools = get_tools()
         self.max_tool_calls_per_step = 2
+        self.telemetry = get_telemetry_logger()
 
     async def execute_plan(self, plan: PlannerOutput, user_inputs: Dict[str, Any] = None, max_tool_calls: int = None) -> ExecutionState:
         """
@@ -179,10 +182,44 @@ class Executor:
 
         # 参数映射：将常见的参数名映射为工具期望的参数名
         mapped_inputs = self._map_tool_parameters(step.tool, inputs)
-        logger.info(f"调用工具: {step.tool} 参数: {mapped_inputs}")
+
+        # Telemetry: 参数验证（如果参数无效）
+        try:
+            # 这里可以添加参数验证逻辑
+            logger.info(f"调用工具: {step.tool} 参数: {mapped_inputs}")
+        except Exception as e:
+            self.telemetry.log_event(
+                stage=TelemetryStage.ACT,
+                event=TelemetryEvent.EXEC_PARAM_INVALID,
+                user_query="",  # 需要从上下文获取
+                context={
+                    "tool": step.tool,
+                    "step_id": step.id,
+                    "error": str(e),
+                    "inputs": inputs,
+                    "mapped_inputs": mapped_inputs
+                }
+            )
+            raise
 
         # 执行工具
         result = execute_tool(step.tool, self.tools, **mapped_inputs)
+
+        # 检查工具执行结果
+        if isinstance(result, StandardToolResult) and not result.ok:
+            # Telemetry: 工具执行失败
+            self.telemetry.log_event(
+                stage=TelemetryStage.ACT,
+                event=TelemetryEvent.EXEC_TOOL_FAIL,
+                user_query="",  # 需要从上下文获取
+                context={
+                    "tool": step.tool,
+                    "step_id": step.id,
+                    "error": result.error.dict() if result.error else {},
+                    "inputs": mapped_inputs
+                },
+                model={"executor": self.llm.config.deepseek_model}
+            )
 
         # 保存结果
         state.set_artifact(step.output_key, result)

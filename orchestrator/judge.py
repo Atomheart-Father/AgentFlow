@@ -11,6 +11,7 @@ from llm_interface import create_llm_interface_with_keys
 from schemas.orchestrator import PlannerOutput, JudgeOutput, validate_judge_output
 from orchestrator.executor import ExecutionState
 from config import get_config
+from telemetry import get_telemetry_logger, TelemetryStage, TelemetryEvent
 from logger import get_logger
 
 logger = get_logger()
@@ -63,6 +64,7 @@ class Judge:
         self.max_retries = 2
         self.max_tokens = config.max_tokens_per_stage
         self.temperature = config.judge_temperature
+        self.telemetry = get_telemetry_logger()
 
     async def evaluate_execution(self,
                                plan: PlannerOutput,
@@ -105,7 +107,23 @@ class Judge:
                 # 解析判断结果（严格JSON模式）
                 judge_result = validate_judge_output(response.content)
 
-                logger.info(f"✅ 判断完成: satisfied={judge_result.satisfied}, confidence={judge_result.confidence}")
+                # Telemetry: 记录判断结果
+                if not judge_result.satisfied:
+                    # SPEC_MISMATCH: 产物不满足success_criteria
+                    self.telemetry.log_event(
+                        stage=TelemetryStage.JUDGE,
+                        event=TelemetryEvent.SPEC_MISMATCH,
+                        user_query="",  # 需要从上下文获取
+                        context={
+                            "iteration": iteration,
+                            "missing": judge_result.missing,
+                            "questions": judge_result.questions
+                        },
+                        plan_excerpt={"goal": plan.goal, "success_criteria": plan.success_criteria},
+                        model={"judge": self.llm.config.deepseek_model}
+                    )
+
+                logger.info(f"✅ 判断完成: satisfied={judge_result.satisfied}")
                 return judge_result
 
             except Exception as e:
