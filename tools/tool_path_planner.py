@@ -12,17 +12,13 @@ config = get_config()
 class ToolPathPlanner:
     def __init__(self):
         self.name = "path_planner"
-        self.description = "将自然语言路径描述转换为系统可用的文件路径。支持桌面、下载、文档等常见目录的智能映射。"
+        self.description = "根据配置文件中的输出目录和给定的文件名生成完整的文件路径。"
         self.parameters = {
             "type": "object",
             "properties": {
-                "description": {
-                    "type": "string",
-                    "description": "路径的自然语言描述，例如：'桌面上的报告文件'、'下载文件夹中的图片'、'我的文档文件夹'"
-                },
                 "filename": {
                     "type": "string",
-                    "description": "文件名（可选），如果提供会自动添加合适的文件扩展名"
+                    "description": "文件名（不含扩展名）"
                 },
                 "file_type": {
                     "type": "string",
@@ -31,16 +27,15 @@ class ToolPathPlanner:
                     "default": "txt"
                 }
             },
-            "required": ["description"]
+            "required": ["filename"]
         }
 
-    def run(self, description: str, filename: str = None, file_type: str = "txt", **kwargs) -> StandardToolResult:
+    def run(self, filename: str, file_type: str = "txt", **kwargs) -> StandardToolResult:
         """
         规划文件路径
 
         Args:
-            description: 路径描述
-            filename: 文件名（可选）
+            filename: 文件名（不含扩展名）
             file_type: 文件类型
 
         Returns:
@@ -49,8 +44,17 @@ class ToolPathPlanner:
         start_time = time.time()
 
         try:
-            # 解析路径描述
-            resolved_path = self._parse_path_description(description, filename, file_type)
+            # 使用配置文件中的输出目录
+            output_dir = config.desktop_dir_path
+
+            # 构建完整文件名
+            if not filename.lower().endswith(f".{file_type.lower()}"):
+                full_filename = f"{filename}.{file_type}"
+            else:
+                full_filename = filename
+
+            # 生成完整路径
+            resolved_path = output_dir / full_filename
 
             # 验证路径安全性
             if not self._is_path_safe(resolved_path):
@@ -60,23 +64,24 @@ class ToolPathPlanner:
                     retryable=False
                 )
                 meta = create_tool_meta(self.name, int((time.time() - start_time) * 1000),
-                                      {"description": description, "filename": filename, "file_type": file_type})
+                                      {"filename": filename, "file_type": file_type})
                 return StandardToolResult.failure(error, meta)
 
             # 返回规划结果
             latency_ms = int((time.time() - start_time) * 1000)
             result = {
-                "original_description": description,
+                "filename": filename,
+                "file_type": file_type,
+                "output_dir": str(output_dir),
                 "resolved_path": str(resolved_path),
                 "absolute_path": str(resolved_path.absolute()),
                 "exists": resolved_path.exists(),
                 "is_directory": resolved_path.is_dir() if resolved_path.exists() else False,
-                "parent_exists": resolved_path.parent.exists(),
-                "file_type": file_type
+                "parent_exists": resolved_path.parent.exists()
             }
 
             meta = create_tool_meta(self.name, latency_ms,
-                                  {"description": description, "filename": filename, "file_type": file_type})
+                                  {"filename": filename, "file_type": file_type})
             return StandardToolResult.success(result, meta)
 
         except Exception as e:
@@ -87,52 +92,9 @@ class ToolPathPlanner:
                 retryable=False
             )
             meta = create_tool_meta(self.name, latency_ms,
-                                  {"description": description, "filename": filename, "file_type": file_type})
+                                  {"filename": filename, "file_type": file_type})
             return StandardToolResult.failure(error, meta)
 
-    def _parse_path_description(self, description: str, filename: str = None, file_type: str = "txt") -> Path:
-        """
-        解析路径描述
-
-        Args:
-            description: 路径描述
-            filename: 文件名
-            file_type: 文件类型
-
-        Returns:
-            解析后的路径
-        """
-        desc_lower = description.lower().strip()
-
-        # 获取基础目录
-        base_path = Path.cwd()  # 当前工作目录
-        desktop_path = config.desktop_dir_path
-
-        # 智能路径映射
-        if any(word in desc_lower for word in ["桌面", "desktop"]):
-            target_dir = desktop_path
-        elif any(word in desc_lower for word in ["下载", "downloads", "download"]):
-            target_dir = Path.home() / "Downloads"
-        elif any(word in desc_lower for word in ["文档", "documents", "document"]):
-            target_dir = Path.home() / "Documents"
-        elif any(word in desc_lower for word in ["图片", "图片", "images", "pictures"]):
-            target_dir = Path.home() / "Pictures"
-        elif any(word in desc_lower for word in ["工作", "workspace", "工作区"]):
-            target_dir = base_path
-        else:
-            # 默认使用桌面
-            target_dir = desktop_path
-
-        # 如果没有指定文件名，生成一个
-        if not filename:
-            timestamp = time.strftime("%Y%m%d_%H%M%S")
-            filename = f"file_{timestamp}"
-
-        # 确保有扩展名
-        if not filename.lower().endswith(f".{file_type.lower()}"):
-            filename = f"{filename}.{file_type}"
-
-        return target_dir / filename
 
     def _is_path_safe(self, path: Path) -> bool:
         """

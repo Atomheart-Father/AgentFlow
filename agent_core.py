@@ -507,10 +507,13 @@ class AgentCore:
     async def _process_with_m3_stream(self, user_query: str, context: Optional[Dict[str, Any]] = None):
         """使用M3编排器处理查询（流式）"""
         if not hasattr(self, 'orchestrator') or not self.orchestrator:
-            yield {"error": "M3编排器未初始化"}
+            yield {"type": "error", "message": "M3编排器未初始化"}
             return
 
         try:
+            # 发送状态更新
+            yield {"type": "status", "message": "正在规划任务"}
+
             # 导入time模块
             import time
 
@@ -520,18 +523,28 @@ class AgentCore:
             # 执行编排
             result = await self.orchestrator.orchestrate(user_query=user_query, context=context)
 
-            # 返回最终结果
-            yield {
-                "final_answer": result.final_answer or "处理完成",
-                "tool_trace": [],  # M3模式暂时不支持详细工具追踪
-                "status": result.status,
-                "execution_time": result.total_time,
-                "done": True
-            }
+            # 发送状态更新
+            yield {"type": "status", "message": "正在执行任务"}
+
+            # 如果有最终答案，分批发送内容
+            if result.final_answer:
+                # 模拟流式输出，分批发送内容
+                content = result.final_answer
+                chunk_size = 50  # 每批50个字符
+                for i in range(0, len(content), chunk_size):
+                    chunk = content[i:i+chunk_size]
+                    yield {"type": "content", "content": chunk}
+                    # 短暂延迟模拟流式效果
+                    await asyncio.sleep(0.01)
+            else:
+                yield {"type": "content", "content": "任务已完成"}
+
+            # 发送最终状态
+            yield {"type": "status", "message": "处理完成"}
 
         except Exception as e:
             logger.error(f"M3流式处理失败: {e}")
-            yield {"error": f"处理失败: {str(e)}"}
+            yield {"type": "error", "message": f"处理失败: {str(e)}"}
 
     async def _process_with_m3(self, user_query: str, context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """
