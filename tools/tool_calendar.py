@@ -12,7 +12,7 @@ class ToolCalendar:
     """日程查询工具"""
 
     def __init__(self):
-        self.name = "calendar.read"
+        self.name = "calendar_read"
         self.description = "从本地日程文件中读取日程信息，支持按日期范围过滤"
         self.parameters = {
             "type": "object",

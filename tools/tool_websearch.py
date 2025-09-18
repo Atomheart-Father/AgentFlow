@@ -11,7 +11,7 @@ class ToolWebSearch:
     """网页搜索工具"""
 
     def __init__(self):
-        self.name = "web.search"
+        self.name = "web_search"
         self.description = "使用DuckDuckGo进行网页搜索，返回搜索结果摘要"
         self.parameters = {
             "type": "object",

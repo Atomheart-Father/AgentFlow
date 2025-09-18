@@ -12,7 +12,7 @@ class ToolEmail:
     """邮件读取工具"""
 
     def __init__(self):
-        self.name = "email.list"
+        self.name = "email_list"
         self.description = "从本地邮箱数据中读取邮件，支持按发件人、主题等条件过滤"
         self.parameters = {
             "type": "object",

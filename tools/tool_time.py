@@ -10,7 +10,7 @@ class ToolTime:
     """时间工具"""
 
     def __init__(self):
-        self.name = "time.now"
+        self.name = "time_now"
         self.description = "获取当前时间信息，包括ISO格式时间、时区、相对时间描述"
         self.parameters = {
             "type": "object",

@@ -11,7 +11,7 @@ class ToolFileReader:
     """文件读取工具"""
 
     def __init__(self):
-        self.name = "file.read"
+        self.name = "file_read"
         self.description = "读取本地文件内容，支持文本文件（.txt, .md, .py等）和PDF文件"
         self.parameters = {
             "type": "object",

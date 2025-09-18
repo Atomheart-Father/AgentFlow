@@ -11,7 +11,7 @@ class ToolWeather:
     """天气查询工具"""
 
     def __init__(self):
-        self.name = "weather.get"
+        self.name = "weather_get"
         self.description = "获取指定城市的天气信息，支持经纬度或城市名查询"
         self.parameters = {
             "type": "object",

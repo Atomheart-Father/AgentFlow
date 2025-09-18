@@ -12,7 +12,7 @@ class ToolMath:
     """数学计算工具"""
 
     def __init__(self):
-        self.name = "math.calc"
+        self.name = "math_calc"
         self.description = "执行安全的数学计算表达式，支持基本运算、函数和常量"
         self.parameters = {
             "type": "object",
