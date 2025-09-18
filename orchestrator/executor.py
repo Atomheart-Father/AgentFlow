@@ -195,10 +195,6 @@ class Executor:
         if not step.tool:
             raise ValueError(f"工具调用步骤 {step.id} 缺少tool字段")
 
-        # 检查工具是否存在
-        if not any(tool.name == step.tool for tool in self.tools):
-            raise ValueError(f"工具 {step.tool} 不存在")
-
         # 参数映射：将常见的参数名映射为工具期望的参数名
         mapped_inputs = self._map_tool_parameters(step.tool, inputs)
 
@@ -324,13 +320,27 @@ class Executor:
 
     async def _execute_summarize(self, step: PlanStep, inputs: Dict[str, Any], state: ExecutionState):
         """执行总结操作"""
-        # 使用LLM进行总结
-        data_to_summarize = inputs.get('data', '')
-        summary_prompt = f"请总结以下内容：\n\n{data_to_summarize}"
+        # 智能汇总输入：优先使用data/text/content，否则拼接所有键值
+        summary_text = None
+        for key in ["data", "text", "content"]:
+            if key in inputs and inputs[key]:
+                summary_text = inputs[key]
+                break
+
+        if summary_text is None:
+            # 将所有输入键值拼接为文本
+            import json as _json
+            parts = []
+            for k, v in inputs.items():
+                if isinstance(v, (dict, list)):
+                    parts.append(f"{k}: {_json.dumps(v, ensure_ascii=False)}")
+                else:
+                    parts.append(f"{k}: {v}")
+            summary_text = "\n".join(parts) if parts else "(无内容)"
 
         messages = [
             {"role": "system", "content": "你是一个专业的总结助手，请简洁准确地总结内容。"},
-            {"role": "user", "content": summary_prompt}
+            {"role": "user", "content": f"请总结以下内容：\n\n{summary_text}"}
         ]
 
         response = await self.llm.generate(
