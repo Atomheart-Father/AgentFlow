@@ -190,6 +190,7 @@ class DeepSeekProvider(LLMProvider):
                 for tool_call in message.tool_calls:
                     if tool_call.type == "function":
                         function_calls.append({
+                            "id": tool_call.id,
                             "name": tool_call.function.name,
                             "arguments": json.loads(tool_call.function.arguments)
                         })
