@@ -191,14 +191,14 @@ async def handle_complex_plan(user_input: str, session_id: str):
             for event in agent_core._process_with_m3_stream(user_input, context={"session_id": session_id}):
                 yield event
 
-        # 在线程池中运行同步生成器
+        # 在线程池中运行同步生成器并逐个处理事件
         loop = asyncio.get_event_loop()
         with concurrent.futures.ThreadPoolExecutor() as executor:
-            async def async_generator():
-                for event in await loop.run_in_executor(executor, lambda: list(sync_event_generator())):
-                    yield event
+            # 获取所有事件列表
+            events = await loop.run_in_executor(executor, lambda: list(sync_event_generator()))
 
-            async for event in async_generator():
+            # 逐个处理事件
+            for event in events:
                 event_type = event.get("type", "")
                 message = event.get("message", "")
 
