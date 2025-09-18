@@ -11,6 +11,7 @@ from enum import Enum
 class StepType(str, Enum):
     """步骤类型枚举"""
     TOOL_CALL = "tool_call"
+    WEB_SEARCH = "web_search"  # 网络搜索步骤
     SUMMARIZE = "summarize"
     WRITE_FILE = "write_file"
     ASK_USER = "ask_user"
