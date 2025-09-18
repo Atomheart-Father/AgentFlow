@@ -289,15 +289,26 @@ class LLMInterface:
                 # 设置超时
                 async with httpx.AsyncClient(timeout=self.timeout) as client:
                     # 这里需要根据不同的provider设置client，但简化起见直接调用
-                    return await self.provider.generate(
-                        prompt=prompt,
-                        messages=messages,
-                        tools_schema=tools_schema,
-                        force_json=force_json,
-                        temperature=self.config.temperature,
-                        max_tokens=self.config.max_tokens,
-                        **kwargs
-                    )
+                    # 准备参数，避免重复传递
+                    provider_kwargs = {
+                        "prompt": prompt,
+                        "messages": messages,
+                        "tools_schema": tools_schema,
+                        "force_json": force_json,
+                        "temperature": self.config.temperature,
+                        "max_tokens": self.config.max_tokens,
+                    }
+
+                    # 如果kwargs中也有这些参数，优先使用kwargs的值
+                    for key in ["temperature", "max_tokens"]:
+                        if key in kwargs:
+                            provider_kwargs[key] = kwargs[key]
+                            del kwargs[key]
+
+                    # 合并剩余的kwargs
+                    provider_kwargs.update(kwargs)
+
+                    return await self.provider.generate(**provider_kwargs)
 
             except Exception as e:
                 last_exception = e

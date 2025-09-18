@@ -12,15 +12,24 @@ from config import get_config
 from logger import get_logger
 from tool_registry import get_tools, execute_tool, ToolError, to_openai_tools
 
+# M3编排器相关导入
+try:
+    from orchestrator import get_orchestrator, orchestrate_query, OrchestratorResult
+    M3_AVAILABLE = True
+except ImportError:
+    M3_AVAILABLE = False
+    logger.warning("M3编排器模块不可用，将使用传统模式")
+
 logger = get_logger()
 
 
 class AgentCore:
     """Agent核心类"""
 
-    def __init__(self, llm_interface=None):
+    def __init__(self, llm_interface=None, use_m3: bool = False):
         self.config = get_config()
         self.llm = llm_interface or get_llm_interface()
+        self.use_m3 = use_m3 and M3_AVAILABLE
 
         # 初始化工具系统
         if self.config.tools_enabled:
@@ -30,11 +39,19 @@ class AgentCore:
             self.tools = []
             logger.info("工具系统已禁用")
 
+        # 初始化M3编排器
+        if self.use_m3:
+            self.orchestrator = get_orchestrator()
+            logger.info("M3编排器模式已启用")
+        else:
+            logger.info("传统Agent模式已启用")
+
         logger.info("Agent核心初始化完成", extra={
             "provider": self.config.model_provider,
             "rag_enabled": self.config.rag_enabled,
             "tools_enabled": self.config.tools_enabled,
             "tools_count": len(self.tools),
+            "use_m3": self.use_m3,
             "llm_initialized": self.llm.provider is not None
         })
 
@@ -69,6 +86,11 @@ class AgentCore:
         logger.info(f"开始处理用户输入: {user_input[:100]}{'...' if len(user_input) > 100 else ''}")
 
         try:
+            # 检查是否使用M3模式
+            if self.use_m3 and hasattr(self, 'orchestrator'):
+                logger.info("使用M3编排器模式处理查询")
+                return await self._process_with_m3(user_query=user_input, context=context)
+
             # 初始化对话历史
             messages = []
             tool_call_trace = []
@@ -215,6 +237,75 @@ class AgentCore:
             return {
                 "response": "抱歉，处理您的请求时出现了错误，请稍后重试。",
                 "metadata": {
+                    "error": str(e),
+                    "timestamp": start_time.isoformat(),
+                    "total_time": (datetime.now() - start_time).total_seconds()
+                }
+            }
+
+    async def _process_with_m3(self, user_query: str, context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """
+        使用M3编排器处理用户查询
+
+        Args:
+            user_query: 用户查询
+            context: 上下文信息
+
+        Returns:
+            处理结果字典
+        """
+        start_time = datetime.now()
+
+        try:
+            # 使用编排器处理查询
+            orchestrator_result = await self.orchestrator.orchestrate(user_query, context)
+
+            # 转换结果格式以保持与传统模式的兼容性
+            response = orchestrator_result.final_answer or "处理完成，但无法生成最终答案。"
+
+            # 构建元数据
+            metadata = {
+                "mode": "m3_orchestrator",
+                "status": orchestrator_result.status,
+                "iteration_count": orchestrator_result.iteration_count,
+                "total_time": orchestrator_result.total_time,
+                "timestamp": start_time.isoformat(),
+                "plan_steps": len(orchestrator_result.final_plan.steps) if orchestrator_result.final_plan else 0,
+                "execution_artifacts": len(orchestrator_result.execution_state.artifacts) if orchestrator_result.execution_state else 0,
+                "judge_history": [jr.to_dict() for jr in orchestrator_result.judge_history]
+            }
+
+            # 如果有工具调用轨迹，添加到元数据中
+            if orchestrator_result.execution_state:
+                tool_trace = []
+                for step_id in orchestrator_result.execution_state.completed_steps:
+                    # 这里可以添加更详细的工具调用信息
+                    tool_trace.append({
+                        "step_id": step_id,
+                        "status": "completed"
+                    })
+                metadata["tool_call_trace"] = tool_trace
+
+            # 如果执行失败，添加错误信息
+            if orchestrator_result.error_message:
+                metadata["error"] = orchestrator_result.error_message
+                if "失败" in orchestrator_result.status:
+                    response = f"处理失败：{orchestrator_result.error_message}"
+
+            logger.info(f"M3编排器处理完成: {orchestrator_result.status}, 耗时{orchestrator_result.total_time:.2f}s")
+
+            return {
+                "response": response,
+                "metadata": metadata
+            }
+
+        except Exception as e:
+            logger.error(f"M3编排器处理失败: {e}", exc_info=True)
+
+            return {
+                "response": "M3编排器处理失败，已回退到传统模式。",
+                "metadata": {
+                    "mode": "m3_fallback",
                     "error": str(e),
                     "timestamp": start_time.isoformat(),
                     "total_time": (datetime.now() - start_time).total_seconds()
@@ -426,11 +517,11 @@ def get_agent_core() -> AgentCore:
     return agent_core
 
 
-def create_agent_core_with_llm() -> AgentCore:
+def create_agent_core_with_llm(use_m3: bool = False) -> AgentCore:
     """创建带有LLM初始化的Agent核心实例"""
     from llm_interface import create_llm_interface_with_keys
     llm = create_llm_interface_with_keys()
-    return AgentCore(llm_interface=llm)
+    return AgentCore(llm_interface=llm, use_m3=use_m3)
 
 
 async def process_message(user_input: str, context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:

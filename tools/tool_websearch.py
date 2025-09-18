@@ -77,7 +77,7 @@ class ToolWebSearch:
 
     async def _search_mock(self, query: str, limit: int = 5, region: str = "wt-wt") -> List[Dict[str, Any]]:
         """
-        模拟搜索结果（当DuckDuckGo不可用时使用）
+        # 当DuckDuckGo不可用时直接返回错误
 
         Args:
             query: 搜索查询
@@ -87,29 +87,8 @@ class ToolWebSearch:
         Returns:
             模拟搜索结果
         """
-        # 模拟搜索结果
-        mock_results = [
-            {
-                "title": f"{query} - 官方文档",
-                "url": f"https://example.com/docs/{query.replace(' ', '-')}",
-                "snippet": f"这是关于{query}的官方文档和指南。",
-                "rank": 1
-            },
-            {
-                "title": f"{query} 教程",
-                "url": f"https://example.com/tutorial/{query.replace(' ', '-')}",
-                "snippet": f"学习{query}的完整教程，包括基础概念和高级用法。",
-                "rank": 2
-            },
-            {
-                "title": f"{query} 最佳实践",
-                "url": f"https://example.com/best-practices/{query.replace(' ', '-')}",
-                "snippet": f"{query}的最佳实践和使用建议。",
-                "rank": 3
-            }
-        ]
-
-        return mock_results[:limit]
+        # DuckDuckGo不可用时抛出错误，不使用模拟数据
+        raise ValueError(f"DuckDuckGo搜索服务不可用，无法搜索 '{query}'")
 
     async def run(self, query: str, limit: int = 5, region: str = "wt-wt", **kwargs) -> Dict[str, Any]:
         """

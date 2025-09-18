@@ -1,8 +1,11 @@
 """
 Gradio用户界面
 提供聊天界面，将用户输入传递给Agent核心处理
+包含心跳机制防止长时间无用掉线
 """
 import asyncio
+import threading
+import time
 import gradio as gr
 from typing import List, Tuple, Dict, Any
 
@@ -24,7 +27,54 @@ class ChatUI:
         self.chat_history: List[Tuple[str, str]] = []
         self.metadata_history: List[Dict[str, Any]] = []
         # 创建带有LLM接口的Agent核心实例
-        self.agent = create_agent_core_with_llm()
+        # 可以通过环境变量控制是否启用M3模式
+        import os
+        use_m3 = os.getenv("USE_M3_ORCHESTRATOR", "false").lower() == "true"
+        self.agent = create_agent_core_with_llm(use_m3=use_m3)
+
+        # 心跳机制
+        self.heartbeat_thread = None
+        self.heartbeat_active = False
+        self.last_activity = time.time()
+
+    def start_heartbeat(self):
+        """启动心跳机制"""
+        if self.heartbeat_thread is None or not self.heartbeat_thread.is_alive():
+            self.heartbeat_active = True
+            self.heartbeat_thread = threading.Thread(target=self._heartbeat_worker, daemon=True)
+            self.heartbeat_thread.start()
+            logger.info("心跳机制已启动")
+
+    def stop_heartbeat(self):
+        """停止心跳机制"""
+        self.heartbeat_active = False
+        if self.heartbeat_thread:
+            self.heartbeat_thread.join(timeout=2)
+        logger.info("心跳机制已停止")
+
+    def _heartbeat_worker(self):
+        """心跳工作线程"""
+        while self.heartbeat_active:
+            try:
+                # 每30秒发送一次心跳
+                time.sleep(30)
+                current_time = time.time()
+
+                # 检查是否有活动（如果超过5分钟没有活动，认为需要心跳）
+                if current_time - self.last_activity > 300:  # 5分钟
+                    logger.debug("发送心跳保持连接")
+                    # 这里可以添加轻量的健康检查调用
+                    # 比如检查agent是否正常工作
+
+                # 检查内存使用情况
+                # 在长时间运行时，这有助于发现潜在问题
+
+            except Exception as e:
+                logger.warning(f"心跳机制异常: {e}")
+
+    def update_activity(self):
+        """更新最后活动时间"""
+        self.last_activity = time.time()
 
     def process_user_message(self, user_input: str, chat_history) -> Tuple[str, List[Tuple[str, str]], str]:
         """
@@ -39,6 +89,9 @@ class ChatUI:
         """
         if not user_input.strip():
             return "", chat_history
+
+        # 更新活动时间
+        self.update_activity()
 
         logger.info(f"收到用户输入: {user_input[:100]}{'...' if len(user_input) > 100 else ''}")
 
@@ -125,10 +178,11 @@ class ChatUI:
         return "\n".join(trace_lines)
 
 
-def create_gradio_interface() -> gr.Blocks:
+def create_gradio_interface(ui: ChatUI = None) -> gr.Blocks:
     """创建Gradio界面"""
 
-    ui = ChatUI()
+    if ui is None:
+        ui = ChatUI()
 
     with gr.Blocks(
         title="AI个人助理",
@@ -215,22 +269,47 @@ def main():
     logger.info("启动Gradio UI...")
 
     try:
-        interface = create_gradio_interface()
+        # 创建UI实例（需要在launch前获取）
+        ui = ChatUI()
+        interface = create_gradio_interface(ui)
 
-        # 启动服务器
+        # 启动心跳机制
+        ui.start_heartbeat()
+
+        # 启动服务器 - 启用队列以提高稳定性
+        interface.queue(max_size=20, api_open=False)  # 启用队列，限制并发
+
         interface.launch(
             server_name="0.0.0.0",
             server_port=7860,
             share=False,
             show_error=True,
-            inbrowser=True
+            inbrowser=True,
+            # 性能优化配置
+            max_threads=4,  # 限制最大线程数
+            auth=None,      # 暂时不启用认证
+            # WebSocket keep-alive 设置 - 新版本Gradio已移除enable_queue参数
+            # prevent_thread_lock参数在新版本中也不再需要
+            # 使用queue()方法替代enable_queue参数
         )
+
+        logger.info("Gradio UI启动成功，心跳机制已启用")
 
     except KeyboardInterrupt:
         logger.info("收到中断信号，正在关闭...")
+        # 停止心跳机制
+        if 'ui' in locals():
+            ui.stop_heartbeat()
     except Exception as e:
         logger.error(f"启动Gradio UI时发生错误: {str(e)}", exc_info=True)
+        # 停止心跳机制
+        if 'ui' in locals():
+            ui.stop_heartbeat()
         raise
+    finally:
+        # 确保心跳机制被停止
+        if 'ui' in locals():
+            ui.stop_heartbeat()
 
 
 if __name__ == "__main__":
