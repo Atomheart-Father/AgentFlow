@@ -52,7 +52,8 @@ class GeminiProvider(LLMProvider):
 
     async def generate(
         self,
-        prompt: str,
+        prompt: str = "",
+        messages: Optional[List[Dict[str, str]]] = None,
         tools_schema: Optional[List[Dict[str, Any]]] = None,
         force_json: bool = False,
         **kwargs
@@ -132,7 +133,8 @@ class DeepSeekProvider(LLMProvider):
 
     async def generate(
         self,
-        prompt: str,
+        prompt: str = "",
+        messages: Optional[List[Dict[str, str]]] = None,
         tools_schema: Optional[List[Dict[str, Any]]] = None,
         force_json: bool = False,
         **kwargs
@@ -141,7 +143,11 @@ class DeepSeekProvider(LLMProvider):
 
         try:
             # 构建消息
-            messages = [{"role": "user", "content": prompt}]
+            if messages is None:
+                messages = [{"role": "user", "content": prompt}]
+            # 如果传入了messages，直接使用（确保是列表格式）
+            elif not isinstance(messages, list):
+                messages = [{"role": "user", "content": str(messages)}]
 
             # 构建工具参数
             tool_params = {}
@@ -250,7 +256,8 @@ class LLMInterface:
 
     async def generate(
         self,
-        prompt: str,
+        prompt: str = "",
+        messages: Optional[List[Dict[str, str]]] = None,
         tools_schema: Optional[List[Dict[str, Any]]] = None,
         force_json: bool = False,
         **kwargs
@@ -259,7 +266,8 @@ class LLMInterface:
         统一生成接口
 
         Args:
-            prompt: 用户提示
+            prompt: 用户提示（当messages为None时使用）
+            messages: 消息列表（优先于prompt）
             tools_schema: 工具模式（可选）
             force_json: 强制JSON输出模式（DeepSeek专用）
             **kwargs: 其他参数
@@ -282,6 +290,7 @@ class LLMInterface:
                     # 这里需要根据不同的provider设置client，但简化起见直接调用
                     return await self.provider.generate(
                         prompt=prompt,
+                        messages=messages,
                         tools_schema=tools_schema,
                         force_json=force_json,
                         temperature=self.config.temperature,

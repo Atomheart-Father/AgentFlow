@@ -93,10 +93,21 @@ class AgentCore:
                     logger.debug(f"当前消息列表: {messages}")
 
                 # 调用LLM（传递messages而不是prompt）
-                llm_response = await self.llm.generate(
-                    prompt="",  # 使用messages而不是prompt
-                    tools_schema=tools_schema
-                )
+                try:
+                    llm_response = await self.llm.generate(
+                        prompt="",  # 使用messages而不是prompt
+                        tools_schema=tools_schema
+                    )
+                except Exception as e:
+                    logger.error(f"LLM调用异常: {e}")
+                    # 如果是网络错误，重试
+                    if "timeout" in str(e).lower() or "connection" in str(e).lower():
+                        logger.info("检测到网络错误，等待后重试...")
+                        import asyncio
+                        await asyncio.sleep(2)
+                        continue
+                    else:
+                        raise e
 
                 # 处理LLM响应
                 assistant_message = {"role": "assistant", "content": llm_response.content}
@@ -192,21 +203,19 @@ class AgentCore:
 
         base_prompt += """
 
-重要规则：
-- 你必须根据用户的问题来决定是否需要调用工具
-- 如果用户问时间相关的问题（如"现在几点"、"今天星期几"），请调用 time_now 工具
-- 如果用户问天气，请调用 weather_get 工具
-- 如果用户问数学计算，请调用 math_calc 工具
-- 如果用户问日程，请调用 calendar_read 工具
-- 如果用户问邮件，请调用 email_list 工具
-- 如果用户问搜索，请调用 web_search 工具
-- 如果用户问文件内容，请调用 file_read 工具
-- 每次只调用最少量的工具（最多2次）
-- 工具调用结果返回后，再生成最终答案
-- 对计算/检索类问题如果没有工具证据，回答要保守并声明不确定
-- 最终答案要基于工具结果，尽量结构化（列表/步骤/结论先行）
+INSTRUCTIONS:
+You are a helpful AI assistant with access to tools. When a user asks a question that requires external information, you MUST call the appropriate tool.
 
-请用友好的语气回答用户的问题。"""
+TOOL USAGE RULES:
+- For time-related questions (current time, day of week, date): Call time_now
+- For weather queries: Call weather_get
+- For math calculations: Call math_calc
+- For calendar/schedule queries: Call calendar_read
+- For email queries: Call email_list
+- For web searches: Call web_search
+- For file reading: Call file_read
+
+IMPORTANT: Always call the appropriate tool when external information is needed. Do not provide generic responses."""
 
         return base_prompt
 
