@@ -147,7 +147,7 @@ class ChatUI:
         return None, chat_history, tool_trace_text
 
     async def _process_m3_stream(self, user_input: str, chat_history) -> Tuple[str, List[Tuple[str, str]], str]:
-        """M3模式流式处理"""
+        """M3模式真·流式处理：assistant_content进聊天气泡，其他事件进状态栏"""
         tool_trace_text = ""
 
         try:
@@ -156,45 +156,86 @@ class ChatUI:
             session = get_session(self.session_id)
 
             if session.has_pending_ask():
-                # 这是对之前问题的回答
-                logger.info("检测到pending_ask，使用用户输入作为回答")
+                # 这是对之前问题的回答 - 带着答案回到PLAN/ACT
+                logger.info("检测到pending_ask，使用用户输入作为回答，触发REPLAN")
+                # 直接处理会话续航，不使用流式
                 result = await self.orchestrator.process_message(user_input, self.session_id)
+
+                # 处理结果
+                if result.status == "waiting_for_user":
+                    # 还是需要等待用户 - 显示问题
+                    if result.pending_questions:
+                        question = result.pending_questions[0]
+                        chat_history[-1] = (user_input, f"🤔 {question}\n\n请在输入框中直接回复，我将继续为您处理请求。")
+                        tool_trace_text = f"🕐 等待用户回答问题..."
+                    else:
+                        chat_history[-1] = (user_input, "等待用户输入...")
+                        tool_trace_text = "🕐 等待用户回答"
+                elif result.final_answer:
+                    # 有最终答案
+                    chat_history[-1] = (user_input, result.final_answer)
+
+                    # 检查文件信息
+                    if hasattr(result, 'execution_state') and result.execution_state:
+                        file_info = self._extract_file_info(result.execution_state.artifacts)
+                        if file_info:
+                            chat_history[-1] = (user_input, f"{result.final_answer}\n\n📁 **文件已保存**\n{file_info}")
+
+                    tool_trace_text = "✅ 处理完成"
+                else:
+                    chat_history[-1] = (user_input, f"处理完成 (状态: {result.status})")
+                    tool_trace_text = f"状态: {result.status}"
+
+                return None, chat_history, tool_trace_text
+
             else:
-                # 正常处理 - 使用AgentCore的流式处理
-                full_response = ""
-                current_status = ""
+                # 正常处理 - 使用真·流式处理
+                assistant_content = ""  # 只进聊天气泡的内容
 
                 async for chunk in self.agent._process_with_m3_stream(user_input, context={"session_id": self.session_id}):
-                    if chunk.get("type") == "status":
-                        current_status = chunk["message"]
-                        # 更新工具轨迹显示当前状态
-                        tool_trace_text = f"🔄 {current_status}"
-                        # 同时更新聊天显示状态
-                        if not full_response:
-                            chat_history[-1] = (user_input, f"🔄 {current_status}...")
-                        else:
-                            chat_history[-1] = (user_input, f"{full_response}\n\n🔄 {current_status}...")
+                    chunk_type = chunk.get("type", "")
 
-                    elif chunk.get("type") == "content":
-                        # 累积内容
-                        full_response += chunk["content"]
-                        chat_history[-1] = (user_input, full_response)
+                    if chunk_type == "assistant_content":
+                        # 模型可见内容 - 进入聊天气泡
+                        content_piece = chunk.get("content", "")
+                        if content_piece:
+                            assistant_content += content_piece
+                            chat_history[-1] = (user_input, assistant_content)
 
-                    elif chunk.get("type") == "error":
-                        error_msg = f"处理失败: {chunk['message']}"
-                        chat_history[-1] = (user_input, error_msg)
-                        tool_trace_text = f"❌ {chunk['message']}"
+                    elif chunk_type in ["tool_trace", "status", "debug"]:
+                        # 工具追踪/状态/调试 - 只进状态栏
+                        message = chunk.get("message", "")
+                        if message:
+                            if chunk_type == "status":
+                                tool_trace_text = f"🔄 {message}"
+                            elif chunk_type == "tool_trace":
+                                tool_trace_text = f"🔧 {message}"
+                            else:  # debug
+                                tool_trace_text = f"🐛 {message}"
+
+                    elif chunk_type == "error":
+                        # 错误 - 显示在聊天框并更新状态栏
+                        error_msg = chunk.get("message", "未知错误")
+                        chat_history[-1] = (user_input, f"❌ 处理失败: {error_msg}")
+                        tool_trace_text = f"❌ {error_msg}"
                         break
 
-                # 如果处理成功，生成最终的工具轨迹
-                if full_response and not tool_trace_text.startswith("❌"):
+                    elif chunk_type == "content":
+                        # 兼容旧格式的内容 - 当作assistant_content处理
+                        content_piece = chunk.get("content", "")
+                        if content_piece:
+                            assistant_content += content_piece
+                            chat_history[-1] = (user_input, assistant_content)
+
+                # 流式处理完成
+                if assistant_content and not tool_trace_text.startswith("❌"):
                     tool_trace_text = "✅ 处理完成"
 
                 return None, chat_history, tool_trace_text
 
         except Exception as e:
             logger.error(f"M3流式处理失败: {e}")
-            chat_history[-1] = (user_input, f"处理失败: {str(e)}")
+            chat_history[-1] = (user_input, f"❌ 处理失败: {str(e)}")
             tool_trace_text = f"❌ 处理失败: {str(e)}"
 
         return None, chat_history, tool_trace_text

@@ -505,41 +505,40 @@ class AgentCore:
             }
 
     async def _process_with_m3_stream(self, user_query: str, context: Optional[Dict[str, Any]] = None):
-        """使用M3编排器处理查询（流式）"""
+        """使用M3编排器处理查询（真·流式：assistant_content进聊天气泡，其他事件进状态栏）"""
         if not hasattr(self, 'orchestrator') or not self.orchestrator:
             yield {"type": "error", "message": "M3编排器未初始化"}
             return
 
         try:
-            # 发送状态更新
+            # 状态：开始规划
             yield {"type": "status", "message": "正在规划任务"}
-
-            # 导入time模块
-            import time
-
-            # 创建会话ID
-            session_id = f"session_{int(time.time())}_{hash(user_query) % 10000}"
 
             # 执行编排
             result = await self.orchestrator.orchestrate(user_query=user_query, context=context)
 
-            # 发送状态更新
+            # 状态：开始执行
             yield {"type": "status", "message": "正在执行任务"}
 
-            # 如果有最终答案，分批发送内容
+            # 如果有最终答案，作为assistant_content分批发送
             if result.final_answer:
-                # 模拟流式输出，分批发送内容
+                # 模拟流式输出，分批发送内容到聊天气泡
                 content = result.final_answer
                 chunk_size = 50  # 每批50个字符
                 for i in range(0, len(content), chunk_size):
                     chunk = content[i:i+chunk_size]
-                    yield {"type": "content", "content": chunk}
+                    yield {"type": "assistant_content", "content": chunk}
                     # 短暂延迟模拟流式效果
                     await asyncio.sleep(0.01)
-            else:
-                yield {"type": "content", "content": "任务已完成"}
 
-            # 发送最终状态
+                # 检查是否有文件保存信息，作为assistant_content补充
+                if hasattr(result, 'execution_state') and result.execution_state:
+                    # 这里可以检查文件保存状态并添加到assistant_content
+                    pass
+            else:
+                yield {"type": "assistant_content", "content": "任务已完成"}
+
+            # 状态：处理完成
             yield {"type": "status", "message": "处理完成"}
 
         except Exception as e:

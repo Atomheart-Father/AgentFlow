@@ -141,17 +141,16 @@ class Judge:
 
     def _build_system_prompt(self) -> str:
         """构建系统提示词 - 只输出JSON"""
-        return """评估执行结果是否满足要求。
+        return """评估执行结果是否满足要求。只输出JSON：{satisfied,bool, missing[], plan_patch?, questions?}。
 
-输出JSON格式：
-{
-  "satisfied": true/false,
-  "missing": ["缺失信息"],
-  "plan_patch": {"修正计划"},
-  "questions": ["最多2个问题"]
-}
+评估规则：
+- satisfied为true：所有success_criteria都已满足，产出完整可用
+- satisfied为false：若能靠补全信息解决，返回1个高质量追问；否则给plan_patch修正计划
+- missing：明确列出缺失的关键信息
+- plan_patch：可选，包含修正步骤的字典
+- questions：最多2个，向用户追问的问题列表
 
-只输出JSON，不要解释。"""
+严格按JSON格式输出，不要任何解释。"""
 
     def _build_user_prompt(self, plan: PlannerOutput, state: ExecutionState, iteration: int) -> str:
         """构建用户提示词"""

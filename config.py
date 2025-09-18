@@ -53,7 +53,7 @@ class Config:
         self.max_retries = int(os.getenv("MAX_RETRIES", "3"))
 
         # M3 Orchestrator 参数
-        self.max_tool_calls_per_act = int(os.getenv("MAX_TOOL_CALLS_PER_ACT", "3"))
+        self.max_tool_calls_per_act = int(os.getenv("MAX_TOOL_CALLS_PER_ACT", "15"))
         self.max_total_tool_calls = int(os.getenv("MAX_TOTAL_TOOL_CALLS", "6"))
         self.max_plan_iters = int(os.getenv("MAX_PLAN_ITERS", "2"))
         self.max_latency_ms = int(os.getenv("MAX_LATENCY_MS", "60000"))
