@@ -131,11 +131,17 @@ class AgentCore:
                                 }
                             })
                         else:
-                            # 已经是字典格式，确保包含type字段
-                            if "type" not in tool_call:
-                                tool_call_copy = tool_call.copy()
-                                tool_call_copy["type"] = "function"
-                                tool_calls.append(tool_call_copy)
+                            # 已经是字典格式，转换为正确格式
+                            if "function" not in tool_call:
+                                # 需要构建function字段
+                                tool_calls.append({
+                                    "id": tool_call.get("id", ""),
+                                    "type": tool_call.get("type", "function"),
+                                    "function": {
+                                        "name": tool_call.get("name", ""),
+                                        "arguments": tool_call.get("arguments", {}) if isinstance(tool_call.get("arguments"), str) else json.dumps(tool_call.get("arguments", {}))
+                                    }
+                                })
                             else:
                                 tool_calls.append(tool_call)
 
