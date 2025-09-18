@@ -255,17 +255,25 @@ IMPORTANT: Always call the appropriate tool when external information is needed.
         start_time = time.time()
 
         try:
+            # 调试：打印tool_call对象的类型和结构
+            logger.debug(f"Tool call object type: {type(tool_call)}")
+            logger.debug(f"Tool call object: {tool_call}")
+            logger.debug(f"Tool call dir: {[attr for attr in dir(tool_call) if not attr.startswith('_')]}")
+
             # 处理OpenAI工具调用对象
             if hasattr(tool_call, 'function'):
                 # OpenAI工具调用对象
+                logger.debug(f"Tool call has function attribute: {hasattr(tool_call.function, 'name')}")
                 tool_name = tool_call.function.name
                 arguments = tool_call.function.arguments
                 tool_call_id = tool_call.id
+                logger.debug(f"Extracted from OpenAI object: name={tool_name}, id={tool_call_id}")
             else:
                 # 字典格式（向后兼容）
                 tool_name = tool_call.get("function", {}).get("name", "")
                 arguments = tool_call.get("function", {}).get("arguments", "{}")
                 tool_call_id = tool_call.get("id", "")
+                logger.debug(f"Extracted from dict: name={tool_name}, id={tool_call_id}")
 
             # 解析参数（如果是字符串）
             if isinstance(arguments, str):
