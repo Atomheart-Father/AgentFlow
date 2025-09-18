@@ -8,7 +8,7 @@ from typing import Dict, Any, Optional, List
 from enum import Enum
 from datetime import datetime
 
-from schemas.orchestrator import PlannerOutput, JudgeOutput
+from schemas.orchestrator import PlannerOutput, JudgeOutput, Plan
 from .planner import get_planner
 from .executor import get_executor, ExecutionState
 from .judge import get_judge
@@ -283,7 +283,7 @@ class Orchestrator:
             result.error_message = f"处理用户回答失败: {e}"
             return result
 
-    def _create_remaining_plan(self, original_plan: Plan, execution_state: ExecutionState) -> Plan:
+    def _create_remaining_plan(self, original_plan: PlannerOutput, execution_state: ExecutionState) -> PlannerOutput:
         """创建剩余步骤的计划"""
         # 找到已完成的步骤
         completed_steps = set(execution_state.completed_steps)

@@ -8,7 +8,7 @@ from typing import Dict, Any, List, Optional, Union
 from datetime import datetime
 
 from llm_interface import create_llm_interface_with_keys
-from schemas.orchestrator import PlannerOutput, PlanStep, StepType
+from schemas.orchestrator import PlannerOutput, PlanStep, StepType, Plan
 from tool_registry import get_tools, execute_tool, ToolError
 from schemas.tool_result import StandardToolResult
 from telemetry import get_telemetry_logger, TelemetryStage, TelemetryEvent
@@ -428,7 +428,7 @@ def get_executor() -> Executor:
     return _executor_instance
 
 
-async def execute_plan_async(plan: Plan, user_inputs: Dict[str, Any] = None) -> ExecutionState:
+async def execute_plan_async(plan: PlannerOutput, user_inputs: Dict[str, Any] = None) -> ExecutionState:
     """
     执行计划的便捷函数
 

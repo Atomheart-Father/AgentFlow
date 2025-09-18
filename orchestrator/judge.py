@@ -8,7 +8,7 @@ from typing import Dict, Any, List, Optional, Tuple
 from datetime import datetime
 
 from llm_interface import create_llm_interface_with_keys
-from schemas.orchestrator import PlannerOutput, JudgeOutput, validate_judge_output
+from schemas.orchestrator import PlannerOutput, JudgeOutput, validate_judge_output, Plan
 from orchestrator.executor import ExecutionState
 from config import get_config
 from telemetry import get_telemetry_logger, TelemetryStage, TelemetryEvent
@@ -219,9 +219,9 @@ def get_judge() -> Judge:
     return _judge_instance
 
 
-async def evaluate_execution_async(plan: Plan,
-                                 state: ExecutionState,
-                                 iteration: int = 1) -> JudgeResult:
+async def evaluate_execution_async(plan: PlannerOutput,
+                                   state: ExecutionState,
+                                   iteration: int = 1) -> JudgeOutput:
     """
     评估执行结果的便捷函数
 

@@ -12,6 +12,8 @@ from config import get_config
 from logger import get_logger
 from tool_registry import get_tools, execute_tool, ToolError, to_openai_tools
 
+logger = get_logger()
+
 # M3编排器相关导入
 try:
     from orchestrator import get_orchestrator, orchestrate_query, OrchestratorResult
@@ -19,8 +21,6 @@ try:
 except ImportError:
     M3_AVAILABLE = False
     logger.warning("M3编排器模块不可用，将使用传统模式")
-
-logger = get_logger()
 
 
 class AgentCore:

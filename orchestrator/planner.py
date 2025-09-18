@@ -211,7 +211,7 @@ def get_planner() -> Planner:
     return _planner_instance
 
 
-async def plan_query(user_query: str, context: Dict[str, Any] = None) -> Plan:
+async def plan_query(user_query: str, context: Dict[str, Any] = None) -> PlannerOutput:
     """
     规划用户查询的便捷函数
 
