@@ -62,8 +62,8 @@ async def on_message(message: cl.Message):
     user_msg = cl.Message(content=message.content, author="用户")
     await user_msg.send()
 
-    # 检查是否有pending_ask（后端状态）
-    session = get_session(session_id)
+    # 记录用户消息到对话历史
+    session.add_message("user", message.content)
     if session.has_pending_ask():
         # 这是对之前问题的回答，直接续跑任务
         await handle_resume_with_answer(message.content, session_id)
@@ -114,68 +114,86 @@ async def handle_resume_with_answer(user_answer: str, session_id: str):
     )
     await answer_msg.send()
 
+    # 记录用户回答到对话历史
+    session.add_message("user", f"回答了问题: {user_answer}")
+
     # 清除pending状态
     pending_ask = session.pending_ask
     session.clear_pending_ask()
 
     try:
-        # 使用agent_core继续处理，传递用户答案作为上下文
+        # 确保session有active_task状态
+        if not session.active_task:
+            await cl.Message(content="❌ 会话状态丢失，请重新开始任务", author="助手").send()
+            return
+
+        # 将用户答案设置到active_task的execution_state中
+        if session.active_task.execution_state:
+            # 查找ask_user_pending并设置答案
+            ask_user_pending = session.active_task.execution_state.get_artifact("ask_user_pending")
+            if ask_user_pending and isinstance(ask_user_pending, dict):
+                output_key = ask_user_pending.get("output_key", "user_answer")
+                session.active_task.execution_state.set_artifact(output_key, user_answer)
+                # 清除pending状态
+                session.active_task.execution_state.set_artifact("ask_user_pending", None)
+                print(f"[DEBUG] 在UI层设置用户答案: {output_key} = {user_answer}")
+
+        # 使用agent_core继续处理，传递包含active_task的上下文
         context = {
             "session_id": session_id,
             "user_answer": user_answer,
+            "resume_task": True,  # 标记这是续跑场景
             "pending_question": pending_ask.question if pending_ask else None
         }
 
         # 创建新的assistant消息用于流式输出
         assistant_msg = await cl.Message(content="", author="助手").send()
 
-        # 使用agent_core的流式处理方法继续执行
-        async for event in agent_core._process_with_m3_stream("", context=context):
-            event_type = event.get("type", "")
-            message = event.get("message", "")
+        # 使用agent_core的流式处理方法继续执行（传递session的active_task）
+        from orchestrator import Orchestrator
+        orchestrator = Orchestrator()
 
-            if event_type == "assistant_content":
-                # 真·流式：逐token输出
-                content_delta = event.get("content", "")
-                if content_delta:
-                    await assistant_msg.stream_token(content_delta)
-                    await asyncio.sleep(0)  # 让事件循环flush
+        # 直接调用orchestrator继续执行
+        result = await orchestrator.orchestrate("", context=context, active_task=session.active_task)
 
-            elif event_type in ["status", "tool_trace", "debug"]:
-                # 事件分流：进入侧栏
-                if message:
-                    log_entry = f"🔄 {message}"
-                    await cl.Message(
-                        content=log_entry,
-                        author="系统日志"
-                    ).send()
+        # 处理结果
+        if result.status == "ask_user" and result.pending_questions:
+            # 如果又有新问题，设置新的pending状态
+            new_question = result.pending_questions[0]
+            await cl.Message(
+                content=f"🤔 {new_question}\n\n请直接回复，我将继续处理。",
+                author="助手"
+            ).send()
+            session.set_pending_ask(new_question, "answer")
+            cl.user_session.set("waiting_for_user_input", True)
+            return
 
-            elif event_type == "ask_user":
-                # 如果又有新问题，设置pending状态
-                question = event.get("question", "请提供更多信息")
-                await cl.Message(
-                    content=f"🤔 {question}\n\n请直接回复，我将继续处理。",
-                    author="助手"
-                ).send()
-                session.set_pending_ask(question, "answer")
-                cl.user_session.set("waiting_for_user_input", True)
-                return
+        elif result.final_answer:
+            # 任务完成
+            await assistant_msg.stream_token(result.final_answer)
+            await assistant_msg.update()
+        else:
+            # 其他状态
+            status_msg = f"任务状态: {result.status}"
+            await assistant_msg.stream_token(status_msg)
+            await assistant_msg.update()
 
-            elif event_type == "error":
-                # 错误处理
-                error_msg = event.get("message", "未知错误")
-                await assistant_msg.stream_token(f"\n\n❌ {error_msg}")
-                break
-
-        # 完成流式输出
-        await assistant_msg.update()
-
-        # 添加完成标记到侧栏
+        # 添加完成标记
         completion_log = "✅ 任务继续完成"
         await cl.Message(content=completion_log, author="系统日志").send()
 
+        # 记录助手回复到对话历史
+        if result.final_answer:
+            session.add_message("assistant", result.final_answer)
+
     except Exception as e:
         error_msg = await cl.Message(content=f"❌ 续跑失败: {str(e)}", author="助手").send()
+
+        # 记录错误消息到对话历史
+        try:
+            session.add_message("assistant", f"❌ 续跑失败: {str(e)}")
+        except:
+            pass
 
 
 async def handle_simple_chat(user_input: str, session_id: str):
@@ -276,8 +294,20 @@ async def handle_complex_plan(user_input: str, session_id: str):
         completion_log = "✅ 处理完成"
         await cl.Message(content=completion_log, author="系统日志").send()
 
+        # 记录助手回复到对话历史
+        session = get_session(session_id)
+        if full_content:
+            session.add_message("assistant", full_content)
+
     except Exception as e:
         error_msg = await cl.Message(content=f"❌ 处理失败: {str(e)}", author="助手").send()
+
+        # 记录错误消息到对话历史
+        try:
+            session = get_session(session_id)
+            session.add_message("assistant", f"❌ 处理失败: {str(e)}")
+        except:
+            pass
 
 
 @cl.on_stop

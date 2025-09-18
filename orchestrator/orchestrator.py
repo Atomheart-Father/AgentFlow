@@ -59,6 +59,21 @@ class PendingAsk:
         }
 
 
+class ConversationMessage:
+    """对话消息"""
+    def __init__(self, role: str, content: str, timestamp: float = None):
+        self.role = role  # "user" or "assistant"
+        self.content = content
+        self.timestamp = timestamp or time.time()
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "role": self.role,
+            "content": self.content,
+            "timestamp": self.timestamp
+        }
+
+
 class SessionState:
     """会话状态"""
     def __init__(self):
@@ -66,10 +81,48 @@ class SessionState:
         self.pending_ask: Optional[PendingAsk] = None
         self.session_id: str = str(uuid.uuid4())
         self.created_at: float = time.time()
+        self.conversation_history: List[ConversationMessage] = []  # 对话历史
+        self.user_preferences: Dict[str, Any] = {}  # 用户偏好信息
 
     def has_pending_ask(self) -> bool:
         """检查是否有挂起的问题"""
         return self.pending_ask is not None
+
+    def add_message(self, role: str, content: str):
+        """添加对话消息到历史"""
+        message = ConversationMessage(role, content)
+        self.conversation_history.append(message)
+        # 保持历史记录在合理的长度内
+        if len(self.conversation_history) > 50:
+            self.conversation_history = self.conversation_history[-50:]
+
+    def get_recent_messages(self, limit: int = 10) -> List[ConversationMessage]:
+        """获取最近的对话消息"""
+        return self.conversation_history[-limit:] if self.conversation_history else []
+
+    def set_user_preference(self, key: str, value: Any):
+        """设置用户偏好"""
+        self.user_preferences[key] = value
+
+    def get_user_preference(self, key: str, default: Any = None) -> Any:
+        """获取用户偏好"""
+        return self.user_preferences.get(key, default)
+
+    def get_conversation_context(self) -> str:
+        """获取对话上下文摘要"""
+        if not self.conversation_history:
+            return "新对话开始"
+
+        recent_messages = self.get_recent_messages(5)
+        context_parts = []
+
+        for msg in recent_messages:
+            role_name = "用户" if msg.role == "user" else "助手"
+            # 截取消息内容的前100个字符
+            content_preview = msg.content[:100] + "..." if len(msg.content) > 100 else msg.content
+            context_parts.append(f"{role_name}: {content_preview}")
+
+        return "\n".join(context_parts)
 
     def set_pending_ask(self, question: str, expects: str):
         """设置挂起的问题"""
