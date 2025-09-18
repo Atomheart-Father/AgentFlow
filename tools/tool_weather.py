@@ -1,10 +1,13 @@
 """
 天气查询工具 - 使用Open-Meteo免费API
+返回标准化的工具结果格式
 """
 
 import httpx
+import time
 from typing import Dict, Any, Optional
 from datetime import datetime, timedelta
+from schemas.tool_result import StandardToolResult, ToolMeta, ToolError, ErrorCode, create_tool_meta, create_tool_error
 
 
 class ToolWeather:
@@ -118,7 +121,7 @@ class ToolWeather:
         }
         return weather_codes.get(wmo_code, f"未知天气代码: {wmo_code}")
 
-    async def run(self, location: str, date: str = None, **kwargs) -> Dict[str, Any]:
+    async def run(self, location: str, date: str = None, **kwargs) -> StandardToolResult:
         """
         查询天气信息
 
@@ -128,8 +131,10 @@ class ToolWeather:
             **kwargs: 其他参数
 
         Returns:
-            天气信息
+            标准化的工具结果
         """
+        start_time = time.time()
+
         try:
             # 解析位置
             lat, lon = self._parse_location(location)
@@ -142,15 +147,33 @@ class ToolWeather:
 
             # Open-Meteo API URL
             url = "https://api.open-meteo.com/v1/forecast"
+
+            # 根据日期调整查询参数
+            today = datetime.now().strftime("%Y-%m-%d")
+            is_today = query_date == today
+            is_future = query_date > today
+
             params = {
                 "latitude": lat,
                 "longitude": lon,
-                "current": ["temperature_2m", "weather_code"],
-                "hourly": ["temperature_2m", "weather_code", "precipitation_probability"],
-                "daily": ["temperature_2m_max", "temperature_2m_min", "weather_code"],
                 "timezone": "auto",
-                "forecast_days": 1
             }
+
+            if is_today:
+                # 今天：包含当前天气和基本预报
+                params.update({
+                    "current": ["temperature_2m", "weather_code"],
+                    "hourly": ["temperature_2m", "weather_code", "precipitation_probability"],
+                    "daily": ["temperature_2m_max", "temperature_2m_min", "weather_code"],
+                    "forecast_days": 1
+                })
+            else:
+                # 非今天：重点关注指定日期的详细预报，不包含当前天气
+                params.update({
+                    "daily": ["temperature_2m_max", "temperature_2m_min", "weather_code", "precipitation_sum"],
+                    "hourly": ["temperature_2m", "weather_code", "precipitation_probability", "precipitation"],
+                    "forecast_days": max(3, (datetime.strptime(query_date, "%Y-%m-%d").date() - datetime.now().date()).days + 1)
+                })
 
             async with httpx.AsyncClient(timeout=10.0) as client:
                 response = await client.get(url, params=params)
@@ -162,33 +185,77 @@ class ToolWeather:
             daily = data.get("daily", {})
             hourly = data.get("hourly", {})
 
-            if not current:
-                raise ValueError("无法获取天气数据")
-
             result = {
                 "location": location,
                 "coordinates": {"lat": lat, "lon": lon},
                 "query_date": query_date,
-                "current": {
+                "is_today": is_today,
+                "is_future": is_future
+            }
+
+            if is_today:
+                # 今天：包含当前天气
+                if not current:
+                    error = create_tool_error(ErrorCode.INTERNAL, "无法获取当前天气数据", retryable=False)
+                    meta = create_tool_meta(self.name, int((time.time() - start_time) * 1000), {"location": location, "date": date})
+                    return StandardToolResult.failure(error, meta)
+
+                result["current"] = {
                     "temperature": current.get("temperature_2m"),
                     "weather_code": current.get("weather_code"),
                     "weather_description": self._get_weather_description(current.get("weather_code", 0)),
                     "time": current.get("time")
                 }
-            }
 
-            # 添加每日预报
-            if daily:
-                result["daily"] = {
-                    "max_temp": daily.get("temperature_2m_max", [None])[0],
-                    "min_temp": daily.get("temperature_2m_min", [None])[0],
-                    "weather_code": daily.get("weather_code", [None])[0],
-                    "weather_description": self._get_weather_description(daily.get("weather_code", [0])[0])
+                # 添加每日预报
+                if daily:
+                    result["daily"] = {
+                        "max_temp": daily.get("temperature_2m_max", [None])[0],
+                        "min_temp": daily.get("temperature_2m_min", [None])[0],
+                        "weather_code": daily.get("weather_code", [None])[0],
+                        "weather_description": self._get_weather_description(daily.get("weather_code", [0])[0])
+                    }
+            else:
+                # 非今天：重点关注指定日期的预报
+                if not daily:
+                    error = create_tool_error(ErrorCode.INTERNAL, f"无法获取{query_date}的天气预报", retryable=True)
+                    meta = create_tool_meta(self.name, int((time.time() - start_time) * 1000), {"location": location, "date": date})
+                    return StandardToolResult.failure(error, meta)
+
+                # 查找指定日期的数据
+                dates = daily.get("time", [])
+                try:
+                    date_index = dates.index(query_date)
+                except ValueError:
+                    error = create_tool_error(ErrorCode.INTERNAL, f"没有找到{query_date}的天气数据", retryable=True)
+                    meta = create_tool_meta(self.name, int((time.time() - start_time) * 1000), {"location": location, "date": date})
+                    return StandardToolResult.failure(error, meta)
+
+                result["forecast"] = {
+                    "date": query_date,
+                    "max_temp": daily.get("temperature_2m_max", [])[date_index] if date_index < len(daily.get("temperature_2m_max", [])) else None,
+                    "min_temp": daily.get("temperature_2m_min", [])[date_index] if date_index < len(daily.get("temperature_2m_min", [])) else None,
+                    "weather_code": daily.get("weather_code", [])[date_index] if date_index < len(daily.get("weather_code", [])) else None,
+                    "weather_description": self._get_weather_description(daily.get("weather_code", [])[date_index] if date_index < len(daily.get("weather_code", [])) else 0),
+                    "precipitation_sum": daily.get("precipitation_sum", [])[date_index] if date_index < len(daily.get("precipitation_sum", [])) else None
                 }
 
-            return result
+            latency_ms = int((time.time() - start_time) * 1000)
+            meta = create_tool_meta(self.name, latency_ms, {"location": location, "date": date})
+            return StandardToolResult.success(result, meta)
 
         except httpx.HTTPError as e:
-            raise ValueError(f"天气API请求失败: {e}")
+            latency_ms = int((time.time() - start_time) * 1000)
+            error = create_tool_error(ErrorCode.NETWORK, f"天气API请求失败: {str(e)}", retryable=True)
+            meta = create_tool_meta(self.name, latency_ms, {"location": location, "date": date})
+            return StandardToolResult.failure(error, meta)
+        except ValueError as e:
+            latency_ms = int((time.time() - start_time) * 1000)
+            error = create_tool_error(ErrorCode.INVALID_INPUT, str(e), retryable=False)
+            meta = create_tool_meta(self.name, latency_ms, {"location": location, "date": date})
+            return StandardToolResult.failure(error, meta)
         except Exception as e:
-            raise ValueError(f"天气查询失败: {e}")
+            latency_ms = int((time.time() - start_time) * 1000)
+            error = create_tool_error(ErrorCode.INTERNAL, f"天气查询失败: {str(e)}", retryable=True)
+            meta = create_tool_meta(self.name, latency_ms, {"location": location, "date": date})
+            return StandardToolResult.failure(error, meta)

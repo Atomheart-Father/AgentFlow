@@ -8,10 +8,11 @@ from typing import Dict, Any, Optional, List
 from enum import Enum
 from datetime import datetime
 
-from schemas.plan import Plan, PlanStep, StepType
+from schemas.orchestrator import PlannerOutput, JudgeOutput
 from .planner import get_planner
 from .executor import get_executor, ExecutionState
-from .judge import get_judge, JudgeResult
+from .judge import get_judge
+from config import get_config
 from .post_mortem_logger import get_post_mortem_logger
 from logger import get_logger
 
@@ -23,6 +24,7 @@ class OrchestratorState(Enum):
     PLAN = "plan"
     ACT = "act"
     JUDGE = "judge"
+    ASK_USER = "ask_user"
     DONE = "done"
     FAILED = "failed"
 
@@ -31,14 +33,17 @@ class OrchestratorResult:
     """编排器执行结果"""
 
     def __init__(self):
-        self.final_plan: Optional[Plan] = None
+        self.final_plan: Optional[PlannerOutput] = None
         self.execution_state: Optional[ExecutionState] = None
-        self.judge_history: List[JudgeResult] = []
+        self.judge_history: List[JudgeOutput] = []
         self.iteration_count: int = 0
+        self.plan_iterations: int = 0
+        self.total_tool_calls: int = 0
         self.total_time: float = 0.0
         self.status: str = "pending"
         self.error_message: Optional[str] = None
         self.final_answer: Optional[str] = None
+        self.pending_questions: List[str] = []
 
     def to_dict(self) -> Dict[str, Any]:
         """转换为字典"""
@@ -49,28 +54,30 @@ class OrchestratorResult:
                 "errors": self.execution_state.errors if self.execution_state else [],
                 "completed_steps": self.execution_state.completed_steps if self.execution_state else []
             } if self.execution_state else None,
-            "judge_history": [jr.to_dict() for jr in self.judge_history],
+            "judge_history": [jr.dict() for jr in self.judge_history],
             "iteration_count": self.iteration_count,
+            "plan_iterations": self.plan_iterations,
+            "total_tool_calls": self.total_tool_calls,
             "total_time": self.total_time,
             "status": self.status,
             "error_message": self.error_message,
-            "final_answer": self.final_answer
+            "final_answer": self.final_answer,
+            "pending_questions": self.pending_questions
         }
 
 
 class Orchestrator:
     """编排器主类"""
 
-    def __init__(self, max_iterations: int = 3, max_execution_time: float = 300.0):
-        """
-        初始化编排器
+    def __init__(self):
+        """初始化编排器"""
+        config = get_config()
 
-        Args:
-            max_iterations: 最大迭代次数
-            max_execution_time: 最大执行时间（秒）
-        """
-        self.max_iterations = max_iterations
-        self.max_execution_time = max_execution_time
+        # 预算控制参数
+        self.max_plan_iters = config.max_plan_iters  # 最大规划迭代次数
+        self.max_tool_calls_per_act = config.max_tool_calls_per_act  # 单次ACT最大工具调用数
+        self.max_total_tool_calls = config.max_total_tool_calls  # 总工具调用数上限
+        self.max_execution_time = config.max_latency_ms / 1000.0  # 最大执行时间（秒）
 
         # 获取各模块实例
         self.planner = get_planner()
@@ -78,7 +85,7 @@ class Orchestrator:
         self.judge = get_judge()
         self.post_mortem_logger = get_post_mortem_logger()
 
-        logger.info(f"编排器初始化完成: max_iterations={max_iterations}, max_time={max_execution_time}s")
+        logger.info(f"编排器初始化完成: max_plan_iters={self.max_plan_iters}, max_total_tool_calls={self.max_total_tool_calls}")
 
     async def orchestrate(self, user_query: str, context: Dict[str, Any] = None) -> OrchestratorResult:
         """
@@ -102,60 +109,64 @@ class Orchestrator:
             logger.info(f"开始编排用户查询: {user_query[:100]}{'...' if len(user_query) > 100 else ''}")
 
             current_state = OrchestratorState.PLAN
-            iteration = 1
+            plan_iter = 0  # 规划迭代次数
 
-            while current_state != OrchestratorState.DONE and current_state != OrchestratorState.FAILED:
+            while current_state not in [OrchestratorState.DONE, OrchestratorState.FAILED]:
 
-                logger.info(f"当前状态: {current_state.value}, 迭代轮次: {iteration}")
+                logger.info(f"当前状态: {current_state.value}, 规划轮次: {plan_iter}, 总工具调用: {result.total_tool_calls}")
 
-                # 检查是否超过最大执行时间（在每次迭代开始时检查）
+                # 检查预算
                 elapsed_time = time.time() - start_time
                 if elapsed_time > self.max_execution_time:
-                    logger.warning(f"超过最大执行时间 {self.max_execution_time}s，停止执行")
+                    logger.warning(f"超过最大执行时间 {self.max_execution_time}s")
                     current_state = OrchestratorState.FAILED
                     result.error_message = f"超过最大执行时间 ({self.max_execution_time}s)"
                     break
 
+                if result.total_tool_calls >= self.max_total_tool_calls:
+                    logger.warning(f"达到总工具调用上限 {self.max_total_tool_calls}")
+                    current_state = OrchestratorState.FAILED
+                    result.error_message = f"达到总工具调用上限 ({self.max_total_tool_calls})"
+                    break
+
+                if plan_iter >= self.max_plan_iters:
+                    logger.warning(f"达到最大规划迭代次数 {self.max_plan_iters}")
+                    current_state = OrchestratorState.FAILED
+                    result.error_message = f"达到最大规划迭代次数 ({self.max_plan_iters})"
+                    break
+
+                # 状态机逻辑
                 if current_state == OrchestratorState.PLAN:
-                    self.post_mortem_logger.log_phase_start("PLAN", iteration)
-                    current_state, plan = await self._plan_phase(user_query, context, iteration, result)
-                    self.post_mortem_logger.log_phase_end("PLAN", "completed" if current_state != OrchestratorState.FAILED else "failed")
+                    plan_iter += 1
+                    result.plan_iterations = plan_iter
+                    self.post_mortem_logger.log_phase_start("PLAN", plan_iter)
+                    current_state = await self._plan_phase(user_query, context, result)
 
                 elif current_state == OrchestratorState.ACT:
-                    self.post_mortem_logger.log_phase_start("ACT", iteration)
-                    current_state, execution_state = await self._act_phase(result.final_plan, iteration, result)
-                    status = "completed"
-                    if current_state == OrchestratorState.FAILED:
-                        status = "failed"
-                    self.post_mortem_logger.log_phase_end("ACT", status)
-
-                # ASK_USER状态已移除，现在通过ask_user工具处理
+                    self.post_mortem_logger.log_phase_start("ACT", plan_iter)
+                    current_state = await self._act_phase(result.final_plan, result)
 
                 elif current_state == OrchestratorState.JUDGE:
-                    self.post_mortem_logger.log_phase_start("JUDGE", iteration)
-                    current_state, judge_result = await self._judge_phase(result.final_plan, result.execution_state, iteration, result)
-                    self.post_mortem_logger.log_phase_end("JUDGE", "completed" if current_state == OrchestratorState.DONE else "failed")
+                    self.post_mortem_logger.log_phase_start("JUDGE", plan_iter)
+                    current_state = await self._judge_phase(result.final_plan, result.execution_state, result)
 
-                # 只有在需要重新规划时才增加迭代次数
-                if current_state == OrchestratorState.PLAN and iteration > 1:
-                    iteration += 1
+                elif current_state == OrchestratorState.ASK_USER:
+                    # ASK_USER状态：等待用户输入，然后回到PLAN
+                    logger.info("等待用户回答问题")
+                    result.status = "waiting_for_user"
+                    break
 
-                    # 检查是否超过最大迭代次数（只在重新规划时检查）
-                    if iteration > self.max_iterations:
-                        logger.warning(f"达到最大迭代次数 {self.max_iterations}，停止执行")
-                        current_state = OrchestratorState.FAILED
-                        result.error_message = f"超过最大迭代次数 ({self.max_iterations})"
-                        break
+                self.post_mortem_logger.log_phase_end(current_state.value, "completed")
 
             # 设置最终状态
             result.status = current_state.value
-            result.iteration_count = iteration - 1
+            result.iteration_count = plan_iter
 
             # 生成最终答案
             if current_state == OrchestratorState.DONE and result.final_plan and result.execution_state:
                 result.final_answer = self._generate_final_answer(result.final_plan, result.execution_state)
 
-            logger.info(f"编排完成: 状态={result.status}, 迭代次数={result.iteration_count}")
+            logger.info(f"编排完成: 状态={result.status}, 规划轮次={plan_iter}, 总工具调用={result.total_tool_calls}")
 
         except Exception as e:
             logger.error(f"编排过程出错: {e}", exc_info=True)
@@ -179,42 +190,69 @@ class Orchestrator:
         return result
 
     async def continue_with_user_answer(self, user_answer: str, result: OrchestratorResult) -> OrchestratorResult:
-        """处理用户回答并继续执行"""
+        """
+        处理用户回答并继续执行
+
+        根据新状态机逻辑：
+        1. 写入用户回答到execution state
+        2. 强制调用Planner重新规划
+        3. 继续执行ACT阶段
+        """
         try:
             if not result.execution_state:
                 raise ValueError("没有执行状态，无法处理用户回答")
 
-            ask_user_data = result.execution_state.get_artifact("ask_user_pending")
-            if not ask_user_data:
-                raise ValueError("没有等待的用户问题")
+            # 写入用户回答到execution state
+            result.execution_state.set_artifact("user_answer", user_answer)
+            logger.info(f"用户已回答问题: {user_answer}")
 
-            # 保存用户回答
-            result.execution_state.set_artifact(ask_user_data["output_key"], user_answer)
-            result.execution_state.set_artifact(f"ask_user_{ask_user_data['step_id']}_answered", {
-                **ask_user_data,
-                "answer": user_answer,
-                "status": "answered"
-            })
+            # 清除pending问题状态
+            result.pending_questions = []
 
-            logger.info(f"用户已回答问题: {ask_user_data['question']} -> {user_answer}")
+            # 从ASK_USER状态开始，重新进入PLAN状态
+            current_state = OrchestratorState.PLAN
+            start_time = time.time()
 
-            # 继续执行剩余步骤
-            remaining_plan = self._create_remaining_plan(result.final_plan, result.execution_state)
-            if remaining_plan.steps:
-                logger.info(f"继续执行剩余 {len(remaining_plan.steps)} 个步骤")
-                await self.executor.execute_plan(remaining_plan, result.execution_state)
-            else:
-                logger.info("所有步骤已完成")
+            # 继续状态机循环
+            while current_state not in [OrchestratorState.DONE, OrchestratorState.FAILED]:
 
-            # 继续判断阶段
-            judge_result = await self.judge.evaluate_execution(result.final_plan, result.execution_state, 1)
-            result.judge_history.append(judge_result)
+                # 检查预算
+                elapsed_time = time.time() - start_time
+                if elapsed_time > self.max_execution_time:
+                    current_state = OrchestratorState.FAILED
+                    result.error_message = f"继续执行超时 ({self.max_execution_time}s)"
+                    break
 
-            if judge_result.satisfied:
-                result.status = OrchestratorState.DONE.value
-            else:
-                result.status = OrchestratorState.FAILED.value
+                if result.total_tool_calls >= self.max_total_tool_calls:
+                    current_state = OrchestratorState.FAILED
+                    result.error_message = f"达到总工具调用上限 ({self.max_total_tool_calls})"
+                    break
 
+                # 状态机逻辑（从PLAN开始）
+                if current_state == OrchestratorState.PLAN:
+                    result.plan_iterations += 1
+                    self.post_mortem_logger.log_phase_start("PLAN", result.plan_iterations)
+                    current_state = await self._plan_phase("", {}, result)  # 使用空的query，因为已经有execution state
+
+                elif current_state == OrchestratorState.ACT:
+                    self.post_mortem_logger.log_phase_start("ACT", result.plan_iterations)
+                    current_state = await self._act_phase(result.final_plan, result)
+
+                elif current_state == OrchestratorState.JUDGE:
+                    self.post_mortem_logger.log_phase_start("JUDGE", result.plan_iterations)
+                    current_state = await self._judge_phase(result.final_plan, result.execution_state, result)
+
+                self.post_mortem_logger.log_phase_end(current_state.value, "completed")
+
+            # 更新最终状态
+            result.status = current_state.value
+            result.total_time += time.time() - start_time
+
+            # 生成最终答案
+            if current_state == OrchestratorState.DONE and result.final_plan and result.execution_state:
+                result.final_answer = self._generate_final_answer(result.final_plan, result.execution_state)
+
+            logger.info(f"继续执行完成: 状态={result.status}")
             return result
 
         except Exception as e:
@@ -246,93 +284,82 @@ class Orchestrator:
         return remaining_plan
 
     async def _plan_phase(self, user_query: str, context: Dict[str, Any],
-                         iteration: int, result: OrchestratorResult) -> tuple:
+                         result: OrchestratorResult) -> OrchestratorState:
         """规划阶段"""
         try:
-            logger.info(f"规划阶段 (第{iteration}轮)")
+            logger.info(f"规划阶段 (第{result.plan_iterations}轮)")
 
-            # 如果是第一轮，直接规划
-            if iteration == 1:
-                plan = await self.planner.create_plan(user_query, context)
-            else:
-                # 后续轮次基于之前的判断结果调整计划
-                last_judge = result.judge_history[-1] if result.judge_history else None
-                if last_judge and last_judge.plan_patch:
-                    # 这里应该合并plan_patch，但现在简化处理
-                    logger.info("检测到计划补丁，但暂时使用原计划")
-                    plan = result.final_plan
-                else:
-                    plan = result.final_plan
-
+            # 创建计划
+            plan = await self.planner.create_plan(user_query, context)
             result.final_plan = plan
-            logger.info(f"规划完成: {len(plan.steps)} 个步骤")
 
-            return OrchestratorState.ACT, plan
+            logger.info(f"规划完成: {len(plan.steps)} 个步骤")
+            return OrchestratorState.ACT
 
         except Exception as e:
             logger.error(f"规划阶段失败: {e}")
-            return OrchestratorState.FAILED, None
+            return OrchestratorState.FAILED
 
-    async def _act_phase(self, plan: Plan, iteration: int, result: OrchestratorResult) -> tuple:
+    async def _act_phase(self, plan: PlannerOutput, result: OrchestratorResult) -> OrchestratorState:
         """执行阶段"""
         try:
-            logger.info(f"执行阶段 (第{iteration}轮)")
+            logger.info(f"执行阶段 (第{result.plan_iterations}轮)")
 
-            # 执行计划
-            execution_state = await self.executor.execute_plan(plan)
+            # 执行计划，考虑预算限制
+            execution_state = await self.executor.execute_plan(plan, max_tool_calls=self.max_tool_calls_per_act)
 
             result.execution_state = execution_state
+            result.total_tool_calls += len(execution_state.completed_steps)
+
             logger.info(f"执行完成: {len(execution_state.completed_steps)}/{len(plan.steps)} 步骤成功")
 
-            # 检查是否有等待用户输入的步骤
-            if execution_state.get_artifact("ask_user_pending"):
-                ask_user_data = execution_state.get_artifact("ask_user_pending")
-                logger.info(f"执行阶段暂停，等待用户回答: {ask_user_data['question']}")
-                return OrchestratorState.ASK_USER, execution_state
+            # 检查是否有等待用户输入的步骤（通过ask_user工具）
+            ask_user_pending = execution_state.get_artifact("ask_user_pending")
+            if ask_user_pending:
+                result.pending_questions = ask_user_pending.get("questions", [])
+                logger.info(f"执行阶段暂停，等待用户回答问题")
+                return OrchestratorState.ASK_USER
 
             # 如果有执行错误，记录但继续判断
             if execution_state.errors:
                 logger.warning(f"执行过程中有 {len(execution_state.errors)} 个错误")
 
-            return OrchestratorState.JUDGE, execution_state
-
-            # AskUserException不再使用，现在通过ask_user工具处理
+            return OrchestratorState.JUDGE
 
         except Exception as e:
             logger.error(f"执行阶段失败: {e}")
-            return OrchestratorState.FAILED, None
+            return OrchestratorState.FAILED
 
-    async def _judge_phase(self, plan: Plan, execution_state: ExecutionState,
-                          iteration: int, result: OrchestratorResult) -> tuple:
+    async def _judge_phase(self, plan: PlannerOutput, execution_state: ExecutionState,
+                          result: OrchestratorResult) -> OrchestratorState:
         """判断阶段"""
         try:
-            logger.info(f"判断阶段 (第{iteration}轮)")
+            logger.info(f"判断阶段 (第{result.plan_iterations}轮)")
 
             # 评估执行结果
-            judge_result = await self.judge.evaluate_execution(plan, execution_state, iteration)
+            judge_result = await self.judge.evaluate_execution(plan, execution_state, result.plan_iterations)
 
             result.judge_history.append(judge_result)
 
-            logger.info(f"判断结果: satisfied={judge_result.satisfied}, confidence={judge_result.confidence}")
+            logger.info(f"判断结果: satisfied={judge_result.satisfied}")
 
             # 根据判断结果决定下一步
             if judge_result.satisfied:
                 # 满足条件，执行完成
-                return OrchestratorState.DONE, judge_result
+                return OrchestratorState.DONE
             elif judge_result.questions:
-                # 需要向用户提问（暂时标记为失败，后续可以扩展）
+                # 需要向用户提问
+                result.pending_questions = judge_result.questions
                 logger.info(f"需要向用户提问: {judge_result.questions}")
-                return OrchestratorState.FAILED, judge_result
-            elif iteration < self.max_iterations:
-                # 不满足但可以重试，重新规划
-                return OrchestratorState.PLAN, judge_result
+                return OrchestratorState.ASK_USER
             else:
-                # 达到最大迭代次数，失败
-                return OrchestratorState.FAILED, judge_result
+                # 需要重新规划
+                logger.info("需要重新规划")
+                return OrchestratorState.PLAN
 
         except Exception as e:
             logger.error(f"判断阶段失败: {e}")
-            return OrchestratorState.FAILED, None
+            return OrchestratorState.FAILED
 
     def _generate_final_answer(self, plan: Plan, execution_state: ExecutionState) -> str:
         """生成最终答案"""
@@ -380,29 +407,27 @@ class Orchestrator:
 _orchestrator_instance = None
 
 
-def get_orchestrator(max_iterations: int = 2, max_execution_time: float = 60.0) -> Orchestrator:
+def get_orchestrator() -> Orchestrator:
     """获取编排器实例"""
     global _orchestrator_instance
     if _orchestrator_instance is None:
-        _orchestrator_instance = Orchestrator(max_iterations, max_execution_time)
+        _orchestrator_instance = Orchestrator()
     return _orchestrator_instance
 
 
 async def orchestrate_query(user_query: str,
-                          context: Dict[str, Any] = None,
-                          max_iterations: int = 2) -> OrchestratorResult:
+                          context: Dict[str, Any] = None) -> OrchestratorResult:
     """
     编排用户查询的便捷函数
 
     Args:
         user_query: 用户查询
         context: 上下文信息
-        max_iterations: 最大迭代次数
 
     Returns:
         OrchestratorResult: 执行结果
     """
-    orchestrator = get_orchestrator(max_iterations=max_iterations)
+    orchestrator = get_orchestrator()
     return await orchestrator.orchestrate(user_query, context)
 
 

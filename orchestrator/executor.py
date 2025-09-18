@@ -8,7 +8,7 @@ from typing import Dict, Any, List, Optional, Union
 from datetime import datetime
 
 from llm_interface import create_llm_interface_with_keys
-from schemas.plan import Plan, PlanStep, StepType
+from schemas.orchestrator import PlannerOutput, PlanStep, StepType
 from tool_registry import get_tools, execute_tool, ToolError
 from logger import get_logger
 
@@ -68,24 +68,31 @@ class Executor:
 
     def __init__(self):
         """初始化执行器"""
-        # 使用DeepSeek-V3进行执行
+        from config import get_config
+        config = get_config()
+
+        # 使用配置中的Executor模型
         self.llm = create_llm_interface_with_keys()
-        # 确保使用deepseek-chat模型
-        if hasattr(self.llm.config, 'deepseek_model'):
-            original_model = self.llm.config.deepseek_model
-            self.llm.config.deepseek_model = "deepseek-chat"
-            logger.info(f"Executor使用执行模型: {original_model} -> deepseek-chat")
+        if hasattr(self.llm.config, 'model_provider'):
+            # 强制使用executor模型配置
+            original_provider = self.llm.config.model_provider
+            self.llm.config.model_provider = "deepseek"
+            if hasattr(self.llm.config, 'deepseek_model'):
+                original_model = self.llm.config.deepseek_model
+                self.llm.config.deepseek_model = config.executor_model
+                logger.info(f"Executor使用执行模型: {original_model} -> {config.executor_model}")
 
         self.tools = get_tools()
         self.max_tool_calls_per_step = 2
 
-    async def execute_plan(self, plan: Plan, user_inputs: Dict[str, Any] = None) -> ExecutionState:
+    async def execute_plan(self, plan: PlannerOutput, user_inputs: Dict[str, Any] = None, max_tool_calls: int = None) -> ExecutionState:
         """
         执行完整计划
 
         Args:
             plan: 执行计划
             user_inputs: 用户输入（可选）
+            max_tool_calls: 最大工具调用次数限制
 
         Returns:
             ExecutionState: 执行状态
@@ -96,13 +103,24 @@ class Executor:
 
         logger.info(f"开始执行计划，共 {len(plan.steps)} 个步骤")
 
+        # 初始化工具调用计数
+        tool_call_count = 0
+
         # 按依赖关系排序步骤
         sorted_steps = self._topological_sort(plan.steps)
 
         for step in sorted_steps:
+            # 检查工具调用预算
+            if max_tool_calls is not None and tool_call_count >= max_tool_calls:
+                logger.warning(f"达到工具调用上限 {max_tool_calls}，停止执行")
+                break
+
             try:
                 logger.info(f"执行步骤: {step.id} ({step.type})")
-                await self._execute_step(step, state, plan)
+                step_tool_calls = await self._execute_step(step, state, plan)
+
+                # 更新工具调用计数
+                tool_call_count += step_tool_calls
 
                 # 标记步骤为完成
                 state.completed_steps.append(step.id)
@@ -126,33 +144,26 @@ class Executor:
         logger.info(f"计划执行完成，已完成 {len(state.completed_steps)}/{len(plan.steps)} 个步骤")
         return state
 
-    async def _execute_step(self, step: PlanStep, state: ExecutionState, plan: Plan):
+    async def _execute_step(self, step: PlanStep, state: ExecutionState, plan: PlannerOutput) -> int:
         """执行单个步骤"""
         # 插值替换输入参数
         interpolated_inputs = state.interpolate_inputs(step.inputs)
 
         if step.type == StepType.TOOL_CALL:
             await self._execute_tool_call(step, interpolated_inputs, state)
-
-        elif step.type == StepType.READ:
-            await self._execute_read(step, interpolated_inputs, state)
+            return 1  # 工具调用算作一次
 
         elif step.type == StepType.SUMMARIZE:
             await self._execute_summarize(step, interpolated_inputs, state)
+            return 0
 
-        # ASK_USER步骤已移除，现在通过ask_user工具处理
+        elif step.type == StepType.WRITE_FILE:
+            await self._execute_write_file(step, interpolated_inputs, state)
+            return 0
 
-        elif step.type == StepType.PROCESS:
-            await self._execute_process(step, interpolated_inputs, state)
-
-        elif step.type == StepType.REASONING:
-            await self._execute_reasoning(step, interpolated_inputs, state)
-
-        elif step.type == StepType.RESPONSE_GENERATION:
-            await self._execute_response_generation(step, interpolated_inputs, state)
-
-        elif step.type == StepType.OUTPUT:
-            await self._execute_output(step, interpolated_inputs, state)
+        elif step.type == StepType.ASK_USER:
+            await self._execute_ask_user(step, interpolated_inputs, state)
+            return 0
 
         else:
             raise ValueError(f"不支持的步骤类型: {step.type}")
@@ -248,6 +259,20 @@ class Executor:
         result = response.content.strip()
         state.set_artifact(step.output_key, result)
         logger.info(f"总结完成: {result[:100]}...")
+
+    async def _execute_write_file(self, step: PlanStep, inputs: Dict[str, Any], state: ExecutionState):
+        """执行写文件步骤"""
+        # 使用fs_write工具
+        result = execute_tool("fs_write", self.tools, **inputs)
+        state.set_artifact(step.output_key, result)
+        logger.info(f"写文件步骤 {step.id} 完成，输出到: {step.output_key}")
+
+    async def _execute_ask_user(self, step: PlanStep, inputs: Dict[str, Any], state: ExecutionState):
+        """执行询问用户步骤"""
+        # 使用ask_user工具
+        result = execute_tool("ask_user", self.tools, **inputs)
+        state.set_artifact(step.output_key, result)
+        logger.info(f"询问用户步骤 {step.id} 完成，输出到: {step.output_key}")
 
     # _execute_ask_user已移除，现在通过ask_user工具处理
 
