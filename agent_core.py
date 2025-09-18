@@ -561,6 +561,13 @@ class AgentCore:
                 yield {"type": "ask_user", "question": question, "context": "需要用户信息"}
                 return  # 等待用户输入，不要继续执行
 
+            # 检查是否处于等待用户输入状态
+            if result.status == "waiting_for_user" and result.pending_questions:
+                question = result.pending_questions[0]
+                print(f"[DEBUG] 发送 ask_user 事件 (waiting状态): {question}")
+                yield {"type": "ask_user", "question": question, "context": "需要用户信息"}
+                return  # 等待用户输入，不要继续执行
+
             # 状态：开始执行
             print("[DEBUG] 发送状态事件: 正在执行任务")
             yield {"type": "status", "message": "正在执行任务"}

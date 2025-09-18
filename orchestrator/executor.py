@@ -455,7 +455,7 @@ class Executor:
         logger.info(f"写文件步骤 {step.id} 完成，输出到: {step.output_key}")
 
     async def _execute_ask_user(self, step: PlanStep, inputs: Dict[str, Any], state: ExecutionState):
-        """执行询问用户步骤"""
+        """执行询问用户步骤 - 设置待询问状态"""
         # 记录已经问过的问题，避免重复提问
         if "question" in inputs:
             question = inputs["question"]
@@ -463,10 +463,16 @@ class Executor:
                 state.asked_questions.append(question)
                 logger.debug(f"记录已问问题: {question}")
 
-        # 使用ask_user工具
-        result = execute_tool("ask_user", self.tools, **inputs)
-        state.set_artifact(step.output_key, result)
-        logger.info(f"询问用户步骤 {step.id} 完成，输出到: {step.output_key}")
+        # 设置ask_user_pending状态，让orchestrator知道需要等待用户输入
+        ask_user_pending = {
+            "questions": [inputs.get("question", "请提供更多信息")],
+            "context": inputs.get("context", ""),
+            "step_id": step.id,
+            "output_key": step.output_key
+        }
+
+        state.set_artifact("ask_user_pending", ask_user_pending)
+        logger.info(f"设置ask_user_pending状态，等待用户回答问题: {inputs.get('question', '')}")
 
     # _execute_ask_user已移除，现在通过ask_user工具处理
 
