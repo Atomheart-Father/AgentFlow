@@ -191,7 +191,7 @@ class Orchestrator:
 
         logger.info(f"编排器初始化完成: max_plan_iters={self.max_plan_iters}, max_total_tool_calls={self.max_total_tool_calls}")
 
-    def process_message(self, user_query: str, session_id: str, context: Dict[str, Any] = None) -> OrchestratorResult:
+    async def process_message(self, user_query: str, session_id: str, context: Dict[str, Any] = None) -> OrchestratorResult:
         """
         处理用户消息 - 主入口，支持会话状态管理
 
@@ -208,7 +208,7 @@ class Orchestrator:
         # 判断是继续任务还是新任务
         if session.has_pending_ask():
             # 有挂起的问题，这是继续任务
-            return self._resume_with_answer(user_query, session)
+            return await self._resume_with_answer(user_query, session)
         else:
             # 检查是否有活跃任务且用户要开始新任务（这会忽略挂起的问题）
             if session.active_task and session.active_task.is_active() and self._is_new_task_request(user_query):
@@ -274,7 +274,7 @@ class Orchestrator:
         session.active_task.update_activity()
         return self.orchestrate(user_query, None, session.active_task)
 
-    def _resume_with_answer(self, user_answer: str, session: SessionState) -> OrchestratorResult:
+    async def _resume_with_answer(self, user_answer: str, session: SessionState) -> OrchestratorResult:
         """使用用户答案恢复任务"""
         if not session.pending_ask or not session.active_task:
             # 不应该发生的情况
@@ -301,7 +301,7 @@ class Orchestrator:
             session.active_task.execution_state.set_artifact("user_answer", user_answer)
 
         # 强制重新规划
-        return await self._force_replan(session.active_task)
+        return self._force_replan(session.active_task)
 
     async def _force_replan(self, active_task: ActiveTask) -> OrchestratorResult:
         """强制重新规划当前任务"""
