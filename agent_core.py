@@ -554,8 +554,8 @@ class AgentCore:
                 else:
                     final_content = "任务已完成，所有步骤都已成功执行。"
             else:
-                # 其他状态
-                final_content = f"处理完成 (状态: {result.status})"
+                # 其他状态（如ask_user/waiting），不向聊天气泡写入误导性文本
+                final_content = ""
 
             # 流式输出最终内容
             if final_content:

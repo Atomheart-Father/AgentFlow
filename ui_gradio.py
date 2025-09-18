@@ -183,8 +183,13 @@ class ChatUI:
 
                     tool_trace_text = "✅ 处理完成"
                 else:
-                    chat_history[-1] = (user_input, f"处理完成 (状态: {result.status})")
-                    tool_trace_text = f"状态: {result.status}"
+                    # 如果进入ASK_USER状态，直接把问题放到对话气泡
+                    if result.status == "ask_user" and result.pending_questions:
+                        question = result.pending_questions[0]
+                        chat_history[-1] = (user_input, f"🤔 {question}")
+                        tool_trace_text = "🕐 等待用户回答"
+                    else:
+                        tool_trace_text = f"状态: {result.status}"
 
                 return None, chat_history, tool_trace_text
 

@@ -149,7 +149,12 @@ class Executor:
                 # 更新工具调用计数
                 tool_call_count += step_tool_calls
 
-                # 标记步骤为完成
+                # 如果在步骤执行过程中产生了待询问用户的问题，则立即暂停执行，等待用户输入
+                if state.get_artifact("ask_user_pending"):
+                    logger.info("检测到ask_user_pending，暂停执行等待用户输入")
+                    return state
+
+                # 标记步骤为完成（仅当未进入等待用户输入状态时）
                 state.completed_steps.append(step.id)
 
             except Exception as e:
@@ -198,6 +203,18 @@ class Executor:
         # 参数映射：将常见的参数名映射为工具期望的参数名
         mapped_inputs = self._map_tool_parameters(step.tool, inputs)
 
+        # 前置校验：对于weather_get，若缺少location，触发ask_user闭环
+        if step.tool == "weather_get":
+            location_value = mapped_inputs.get("location")
+            if not isinstance(location_value, str) or not location_value.strip():
+                state.set_artifact("ask_user_pending", {
+                    "questions": ["请告诉我要查询天气的城市（例如：Rotterdam, NL）"],
+                    "expects": "city",
+                    "step_id": step.id
+                })
+                logger.info("weather_get缺少location，已触发ASK_USER等待城市信息")
+                return
+
         # Telemetry: 参数验证（如果参数无效）
         try:
             # 这里可以添加参数验证逻辑
@@ -243,29 +260,17 @@ class Executor:
         """映射工具参数名，将常见的参数名转换为工具期望的参数名，并处理相对日期"""
         mapped = inputs.copy()
 
-        # 相对日期处理：遇到相对日期词，先time.now再归一化
+        # 相对日期处理：遇到相对日期词，使用date_normalize进行归一化（Europe/Amsterdam）
         for key, value in mapped.items():
             if isinstance(value, str):
                 # 处理相对日期词
                 relative_date_keywords = ["明天", "后天", "今天", "tomorrow", "day after tomorrow", "today"]
-                if any(keyword in value.lower() for keyword in relative_date_keywords):
+                v_lower = value.lower()
+                if any(keyword in v_lower for keyword in relative_date_keywords):
                     try:
-                        # 调用time.now工具获取当前时间
-                        time_result = execute_tool("time_now", self.tools)
-                        if isinstance(time_result, StandardToolResult) and time_result.ok:
-                            current_time = time_result.data
-                            if isinstance(current_time, dict) and "current_time" in current_time:
-                                current_datetime = current_time["current_time"]
-                                # 这里可以调用date_normalize工具来处理相对日期
-                                # 简化处理：直接计算
-                                if "明天" in value or "tomorrow" in value:
-                                    # 假设当前是2023-11-01，明天就是2023-11-02
-                                    # 实际应该从current_datetime计算
-                                    mapped[key] = "2023-11-02"  # 临时hardcode，实际应该动态计算
-                                elif "后天" in value or "day after tomorrow" in value:
-                                    mapped[key] = "2023-11-03"
-                                elif "今天" in value or "today" in value:
-                                    mapped[key] = "2023-11-01"
+                        norm = execute_tool("date_normalize", self.tools, date=value, timezone="Europe/Amsterdam")
+                        if isinstance(norm, StandardToolResult) and norm.ok and norm.data and "normalized_date" in norm.data:
+                            mapped[key] = norm.data["normalized_date"]
                     except Exception as e:
                         logger.warning(f"相对日期处理失败: {e}")
 
@@ -281,15 +286,11 @@ class Executor:
                 location_value = mapped["location"]
                 # 处理默认城市描述
                 if isinstance(location_value, str):
-                    if "用户所在城市" in location_value or "默认" in location_value:
-                        mapped["location"] = "北京"
-                    elif "Rotterdam" in location_value:
+                    if "Rotterdam" in location_value:
                         mapped["location"] = "Rotterdam"
                     # 如果是其他城市名，直接使用
 
-            # 如果没有location参数，设置默认值
-            if "location" not in mapped:
-                mapped["location"] = "北京"
+            # 不再设置默认城市，缺少时交由上游触发ASK_USER
 
         # file_read工具的参数映射
         elif tool_name == "file_read":
