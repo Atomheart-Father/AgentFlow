@@ -126,13 +126,22 @@ class Executor:
                 # 标记步骤为完成
                 state.completed_steps.append(step.id)
 
-            except AskUserException as e:
-                # 遇到用户询问，保存状态并返回等待用户输入的状态
-                logger.info(f"步骤 {step.id} 需要用户输入: {e.ask_user_data['question']}")
-                state.set_artifact(f"ask_user_pending", e.ask_user_data)
-                return state  # 返回当前状态，等待用户输入
-
             except Exception as e:
+                # 检查是否是ask_user工具的结果
+                if isinstance(result, StandardToolResult) and result.ok:
+                    result_data = result.data
+                    if isinstance(result_data, dict) and result_data.get("requires_user_input"):
+                        # 遇到用户询问，保存状态并返回等待用户输入的状态
+                        logger.info(f"步骤 {step.id} 需要用户输入: {result_data['question']}")
+                        state.set_artifact("ask_user_pending", {
+                            "question": result_data["question"],
+                            "context": result_data.get("context", ""),
+                            "message": result_data.get("message", ""),
+                            "step_id": step.id
+                        })
+                        return state  # 返回当前状态，等待用户输入
+
+                # 其他异常
                 error_msg = f"步骤 {step.id} 执行失败: {str(e)}"
                 logger.error(error_msg)
                 state.errors.append(error_msg)
