@@ -3,6 +3,7 @@ Agent核心模块
 处理用户输入，协调LLM调用，目前只做直连LLM和日志记录
 """
 import asyncio
+import json
 from typing import Dict, Any, Optional
 from datetime import datetime
 
@@ -116,8 +117,29 @@ class AgentCore:
                 if llm_response.function_calls:
                     logger.info(f"检测到 {len(llm_response.function_calls)} 个工具调用")
 
-                    # 添加assistant消息（包含工具调用）
-                    assistant_message["tool_calls"] = llm_response.function_calls
+                    # 构建正确的tool_calls格式
+                    tool_calls = []
+                    for tool_call in llm_response.function_calls:
+                        if hasattr(tool_call, 'function'):
+                            # OpenAI对象格式，转换为标准格式
+                            tool_calls.append({
+                                "id": tool_call.id,
+                                "type": "function",
+                                "function": {
+                                    "name": tool_call.function.name,
+                                    "arguments": tool_call.function.arguments if isinstance(tool_call.function.arguments, str) else json.dumps(tool_call.function.arguments)
+                                }
+                            })
+                        else:
+                            # 已经是字典格式，确保包含type字段
+                            if "type" not in tool_call:
+                                tool_call_copy = tool_call.copy()
+                                tool_call_copy["type"] = "function"
+                                tool_calls.append(tool_call_copy)
+                            else:
+                                tool_calls.append(tool_call)
+
+                    assistant_message["tool_calls"] = tool_calls
                     messages.append(assistant_message)
 
                     # 执行工具调用
