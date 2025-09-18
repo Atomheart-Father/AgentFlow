@@ -212,11 +212,11 @@ class ChatUI:
                         'original_input': user_input
                     }
 
-                    # 显示需要用户输入的提示，但保持原有格式
+                    # 显示需要用户输入的提示
                     message = f"🤔 {question}"
                     if context:
                         message += f"\n\n上下文：{context}"
-                    message += "\n\n请在输入框中直接回复，我将继续为您处理请求。"
+                    message += "\n\n请在下方输入框中回复，我将继续为您处理请求。"
 
                     # 替换最后一个条目的AI回复，但保持用户输入不变
                     if chat_history and len(chat_history[-1]) == 2:
@@ -482,22 +482,57 @@ class ChatUI:
 
         return f"{provider_info}\n{mode_info}\n{rag_status}\n{tools_status}\n{log_level}"
 
-    def format_tool_trace(self, tool_trace: list) -> str:
+    def format_tool_trace(self, tool_trace: list, orchestrator_trace: dict = None) -> str:
         """格式化工具调用轨迹"""
-        if not tool_trace:
+        if not tool_trace and not orchestrator_trace:
             return "本次对话未使用任何工具"
 
         trace_lines = ["🛠️ 工具调用轨迹:"]
-        for i, trace in enumerate(tool_trace, 1):
-            tool_name = trace.get("tool_name", "未知工具")
-            execution_time = trace.get("execution_time", 0)
-            success = not trace.get("error")
 
-            status_icon = "✅" if success else "❌"
-            trace_lines.append(f"{i}. {status_icon} {tool_name} ({execution_time:.2f}s)")
+        # 如果有编排器轨迹，优先显示阶段信息
+        if orchestrator_trace:
+            phases = orchestrator_trace.get("phases", [])
+            for phase in phases:
+                phase_name = phase.get("phase", "UNKNOWN")
+                duration = phase.get("duration", 0)
+                status = phase.get("status", "completed")
 
-            if trace.get("error"):
-                trace_lines.append(f"   错误: {trace['error'][:100]}...")
+                phase_icon = {
+                    "PLAN": "📋",
+                    "ACT": "⚡",
+                    "JUDGE": "⚖️"
+                }.get(phase_name, "❓")
+
+                status_icon = "✅" if status == "completed" else "❌" if status == "failed" else "⏳"
+                trace_lines.append(f"{phase_icon} {phase_name}阶段 {status_icon} ({duration:.2f}s)")
+
+                # 显示该阶段的工具调用
+                tools = phase.get("tools", [])
+                for tool in tools:
+                    tool_name = tool.get("name", "未知工具")
+                    args = tool.get("args", {})
+                    summary = tool.get("summary", "")
+                    latency = tool.get("latency", 0)
+
+                    # 格式化参数显示
+                    args_str = ", ".join(f"{k}={v}" for k, v in list(args.items())[:3])  # 只显示前3个参数
+                    if len(args) > 3:
+                        args_str += "..."
+
+                    trace_lines.append(f"  └─ {tool_name}({args_str}) → {summary} ({latency:.2f}s)")
+
+        # 兼容旧的tool_trace格式
+        elif tool_trace:
+            for i, trace in enumerate(tool_trace, 1):
+                tool_name = trace.get("tool_name", "未知工具")
+                execution_time = trace.get("execution_time", 0)
+                success = not trace.get("error")
+
+                status_icon = "✅" if success else "❌"
+                trace_lines.append(f"{i}. {status_icon} {tool_name} ({execution_time:.2f}s)")
+
+                if trace.get("error"):
+                    trace_lines.append(f"   错误: {trace['error'][:100]}...")
 
         return "\n".join(trace_lines)
 
