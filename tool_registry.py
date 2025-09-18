@@ -193,5 +193,5 @@ if __name__ == "__main__":
     if tools:
         openai_format = to_openai_tools(tools)
         logger.info(f"OpenAI格式工具数量: {len(openai_format)}")
-        logger.info("第一个工具定义示例:"
+        logger.info("第一个工具定义示例:")
         logger.info(f"第一个工具定义示例: {openai_format[0] if openai_format else '无工具'}")
