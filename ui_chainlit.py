@@ -182,15 +182,23 @@ async def handle_complex_plan(user_input: str, session_id: str):
         # 用于收集侧栏日志
         sidebar_logs = []
 
+        # 使用asyncio线程池执行器处理同步生成器，避免阻塞事件循环
+        import concurrent.futures
+        import asyncio
+
         def sync_event_generator():
             """同步事件生成器包装器"""
-            # 这里假设agent_core._process_with_m3_stream返回同步生成器
-            # 如果是异步的，需要相应调整
             for event in agent_core._process_with_m3_stream(user_input, context={"session_id": session_id}):
                 yield event
 
-        # 使用anyio.to_thread处理同步生成器，避免阻塞事件循环
-        async for event in anyio.to_thread.run_sync(sync_event_generator):
+        # 在线程池中运行同步生成器
+        loop = asyncio.get_event_loop()
+        with concurrent.futures.ThreadPoolExecutor() as executor:
+            async def async_generator():
+                for event in await loop.run_in_executor(executor, lambda: list(sync_event_generator())):
+                    yield event
+
+            async for event in async_generator():
             event_type = event.get("type", "")
             message = event.get("message", "")
 
