@@ -452,9 +452,15 @@ class Orchestrator:
         else:
             current_state = OrchestratorState.PLAN
 
-        # 开始备现身复盘会话
-        session_id = f"session_{int(time.time())}_{hash(user_query) % 10000}"
-        self.post_mortem_logger.start_session(session_id, user_query, "m3")
+        # 使用提供的session_id，如果没有则创建新的
+        if context and "session_id" in context:
+            session_id = context["session_id"]
+        else:
+            session_id = f"session_{int(time.time())}_{hash(user_query) % 10000}"
+
+        # 只在第一次调用时启动post_mortem会话
+        if not active_task:
+            self.post_mortem_logger.start_session(session_id, user_query, "m3")
 
         try:
             logger.info(f"开始编排用户查询: {user_query[:100]}{'...' if len(user_query) > 100 else ''}")
@@ -562,6 +568,21 @@ class Orchestrator:
             if active_task:
                 active_task.result = result
                 active_task.update_activity()
+
+                # 确保active_task被保存到session中
+                if session_id in _sessions:
+                    session = _sessions[session_id]
+                    # 更新session中的active_task
+                    if result.final_plan:
+                        active_task.plan = result.final_plan
+                    if result.execution_state:
+                        active_task.execution_state = result.execution_state
+                    active_task.iteration_count = result.iteration_count
+                    active_task.plan_iterations = result.plan_iterations
+                    active_task.total_tool_calls = result.total_tool_calls
+
+                    session.active_task = active_task
+                    logger.info(f"已保存active_task到session {session_id}")
 
             # 结束备现身复盘会话
             final_result = {

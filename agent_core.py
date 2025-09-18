@@ -698,6 +698,23 @@ class AgentCore:
             # 使用编排器处理查询
             orchestrator_result = await self.orchestrator.orchestrate(user_query, context)
 
+            # 如果是ask_user状态，确保session中有active_task
+            if orchestrator_result.status == "ask_user" and context and "session_id" in context:
+                session_id = context["session_id"]
+                from orchestrator import get_session
+                session = get_session(session_id)
+
+                # 创建active_task来保存当前状态
+                if not session.active_task:
+                    from orchestrator.orchestrator import ActiveTask
+                    session.active_task = ActiveTask()
+                    session.active_task.plan = orchestrator_result.final_plan
+                    session.active_task.execution_state = orchestrator_result.execution_state
+                    session.active_task.iteration_count = orchestrator_result.iteration_count
+                    session.active_task.plan_iterations = orchestrator_result.plan_iterations
+                    session.active_task.total_tool_calls = orchestrator_result.total_tool_calls
+                    print(f"[DEBUG] 为session {session_id} 创建了active_task")
+
             # 检查是否处于ask_user状态
             if orchestrator_result.status == "ask_user" and orchestrator_result.execution_state:
                 ask_user_data = orchestrator_result.execution_state.get_artifact("ask_user_pending")
