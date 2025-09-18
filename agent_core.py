@@ -89,6 +89,8 @@ class AgentCore:
                 if self.tools and tool_call_count < max_tool_calls:
                     tools_schema = to_openai_tools(self.tools)
                     logger.debug(f"启用工具模式，共 {len(self.tools)} 个工具")
+                    logger.debug(f"工具schema: {tools_schema}")
+                    logger.debug(f"当前消息列表: {messages}")
 
                 # 调用LLM（传递messages而不是prompt）
                 llm_response = await self.llm.generate(
@@ -191,7 +193,14 @@ class AgentCore:
         base_prompt += """
 
 重要规则：
-- 如果需要外部信息（如天气、时间、搜索等），请优先调用相应工具
+- 你必须根据用户的问题来决定是否需要调用工具
+- 如果用户问时间相关的问题（如"现在几点"、"今天星期几"），请调用 time_now 工具
+- 如果用户问天气，请调用 weather_get 工具
+- 如果用户问数学计算，请调用 math_calc 工具
+- 如果用户问日程，请调用 calendar_read 工具
+- 如果用户问邮件，请调用 email_list 工具
+- 如果用户问搜索，请调用 web_search 工具
+- 如果用户问文件内容，请调用 file_read 工具
 - 每次只调用最少量的工具（最多2次）
 - 工具调用结果返回后，再生成最终答案
 - 对计算/检索类问题如果没有工具证据，回答要保守并声明不确定

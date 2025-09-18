@@ -1,0 +1,52 @@
+[
+  {
+    "id": 1,
+    "from": "boss@company.com",
+    "to": "me@company.com",
+    "subject": "Q1项目进度报告",
+    "snippet": "请查看附件中的项目进度报告...",
+    "received": "2025-09-18T13:54:59.495619",
+    "read": false,
+    "has_attachments": true
+  },
+  {
+    "id": 2,
+    "from": "hr@company.com",
+    "to": "me@company.com",
+    "subject": "薪资调整通知",
+    "snippet": "根据公司政策和您的表现...",
+    "received": "2025-09-17T15:54:59.495619",
+    "read": false,
+    "has_attachments": false
+  },
+  {
+    "id": 3,
+    "from": "client@partner.com",
+    "to": "me@company.com",
+    "subject": "合作项目需求确认",
+    "snippet": "关于下个月的合作项目，我们需要确认以下需求...",
+    "received": "2025-09-16T15:54:59.495619",
+    "read": true,
+    "has_attachments": false
+  },
+  {
+    "id": 4,
+    "from": "newsletter@tech.com",
+    "to": "me@company.com",
+    "subject": "AI技术周刊 - 第45期",
+    "snippet": "本周AI技术热点：大语言模型进展...",
+    "received": "2025-09-15T15:54:59.495619",
+    "read": true,
+    "has_attachments": false
+  },
+  {
+    "id": 5,
+    "from": "system@company.com",
+    "to": "me@company.com",
+    "subject": "系统维护通知",
+    "snippet": "本周末将进行系统维护...",
+    "received": "2025-09-13T15:54:59.495619",
+    "read": true,
+    "has_attachments": false
+  }
+]

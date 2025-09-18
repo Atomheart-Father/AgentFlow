@@ -168,6 +168,12 @@ class DeepSeekProvider(LLMProvider):
                 **tool_params
             )
 
+            # 调试信息：打印DeepSeek的原始响应
+            logger.debug(f"DeepSeek原始响应: {response}")
+            logger.debug(f"消息内容: {response.choices[0].message.content}")
+            if hasattr(response.choices[0].message, 'tool_calls') and response.choices[0].message.tool_calls:
+                logger.debug(f"工具调用: {response.choices[0].message.tool_calls}")
+
             # 解析响应
             message = response.choices[0].message
             content = message.content or ""
