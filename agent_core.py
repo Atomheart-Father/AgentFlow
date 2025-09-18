@@ -95,7 +95,7 @@ class AgentCore:
                 # 调用LLM（传递messages而不是prompt）
                 try:
                     llm_response = await self.llm.generate(
-                        prompt="",  # 使用messages而不是prompt
+                        messages=messages,  # 传递消息列表
                         tools_schema=tools_schema
                     )
                 except Exception as e:
