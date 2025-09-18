@@ -456,6 +456,16 @@ class Orchestrator:
                     # ASK_USER状态：设置pending_ask并等待用户输入
                     logger.info("设置pending_ask状态，等待用户回答问题")
                     result.status = "waiting_for_user"
+
+                    # 从execution_state中提取pending_questions
+                    if result.execution_state:
+                        ask_user_pending = result.execution_state.get_artifact("ask_user_pending")
+                        if ask_user_pending and isinstance(ask_user_pending, dict):
+                            questions = ask_user_pending.get("questions", [])
+                            if questions:
+                                result.pending_questions = questions
+                                logger.info(f"设置pending_questions: {questions}")
+
                     # pending_ask会在UI层通过session状态管理
                     break
 

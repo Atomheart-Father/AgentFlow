@@ -133,7 +133,7 @@ class Planner:
 - calendar_read: 查看日程 {"date": "YYYY-MM-DD"}
 - file_read: 读取文件 {"file_path": "路径"}
 - fs_write: 写入文件 {"path": "路径", "content": "内容"}
-- path_planner: 规划文件路径 {"filename": "report", "file_type": "md"}
+- path_planner: 规划文件路径（只接受filename和file_type参数）{"filename": "report", "file_type": "md"}
 - ask_user: 询问用户 {"question": "问题"}
 - math_calc: 数学计算 {"expression": "表达式"}
 - web_search: 网络搜索 {"query": "搜索词", "max_results": 5}

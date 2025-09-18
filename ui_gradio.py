@@ -252,11 +252,11 @@ class ChatUI:
                 if chunk.get("type") == "status":
                     # 状态更新
                     status_message = chunk["message"]
-                    # 更新聊天历史中的AI回复，优先显示状态信息
-                    if status_message and not full_response:
+                    # 更新聊天历史中的AI回复，显示推理状态
+                    if not full_response:
                         # 如果还没有内容，只显示状态
                         chat_history[-1] = (user_input, f"🔄 {status_message}...")
-                    elif full_response:
+                    else:
                         # 如果已有内容，在内容后显示状态
                         chat_history[-1] = (user_input, f"{full_response}\n\n🔄 {status_message}...")
 
