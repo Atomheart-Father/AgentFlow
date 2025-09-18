@@ -50,14 +50,22 @@ DEEPSEEK_BASE_URL=https://api.deepseek.com
 ### 3. Start the System
 
 ```bash
-# Start Gradio interface
+# Option 1: Start Gradio interface (legacy)
 python main.py
 
-# Or run UI directly
+# Option 2: Run Gradio UI directly (legacy)
 python ui_gradio.py
+
+# Option 3: Start Chainlit UI (推荐 - 支持真·流式和智能分流)
+chainlit run ui_chainlit.py -w
 ```
 
-The system will start at `http://localhost:7860`, and you can access the chat interface in your browser.
+- **Gradio UI**: 传统界面，启动在 `http://localhost:7860`
+- **Chainlit UI** (推荐): 现代化流式界面，启动在 `http://localhost:8000`，支持：
+  - ✅ 真·流式响应（逐token显示）
+  - ✅ 智能分流（简单问答vs复杂编排）
+  - ✅ AskUser续跑（避免超时）
+  - ✅ 事件分流（状态/工具轨迹进侧栏）
 
 ## 🎯 本地快速试跑
 

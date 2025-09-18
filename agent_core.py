@@ -504,6 +504,29 @@ class AgentCore:
                 "error": f"处理请求时发生错误: {str(e)}"
             }
 
+    async def simple_chat(self, user_input: str, context: Optional[Dict[str, Any]] = None) -> str:
+        """简单问答接口 - 直接用Chat模型回答"""
+        if self.llm.provider is None:
+            raise RuntimeError("LLM提供者未初始化")
+
+        try:
+            messages = [
+                {"role": "system", "content": "你是一个友好的AI助手，请直接回答用户的问题，保持简洁明了。"},
+                {"role": "user", "content": user_input}
+            ]
+
+            response = await self.llm.generate(
+                messages=messages,
+                max_tokens=1000,
+                temperature=0.7
+            )
+
+            return response.content.strip()
+
+        except Exception as e:
+            logger.error(f"简单问答失败: {e}")
+            return f"抱歉，处理您的请求时出现错误: {str(e)}"
+
     async def _process_with_m3_stream(self, user_query: str, context: Optional[Dict[str, Any]] = None):
         """使用M3编排器处理查询（真·流式：assistant_content进聊天气泡，其他事件进状态栏）"""
         if not hasattr(self, 'orchestrator') or not self.orchestrator:

@@ -8,6 +8,13 @@ session_timeout = 3600
 # Duration (in seconds) of the user session expiry
 user_session_timeout = 1296000  # 15 days
 
+# Enable streaming for better real-time responses
+enable_streaming = true
+
+# WebSocket ping/pong for connection health
+websocket_ping_interval = 30
+websocket_ping_timeout = 10
+
 # Enable third parties caching (e.g., LangChain cache)
 cache = false
 
