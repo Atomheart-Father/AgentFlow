@@ -135,9 +135,18 @@ class AgentCore:
                         messages.append(tool_message)
 
                         # 记录工具调用轨迹
+                        if hasattr(tool_call, 'function'):
+                            # OpenAI对象格式
+                            tool_name = tool_call.function.name
+                            arguments = tool_call.function.arguments
+                        else:
+                            # 字典格式
+                            tool_name = tool_call.get("name", "")
+                            arguments = tool_call.get("arguments", {})
+
                         tool_call_trace.append({
-                            "tool_name": tool_call["function"]["name"],
-                            "arguments": tool_call["function"]["arguments"],
+                            "tool_name": tool_name,
+                            "arguments": arguments,
                             "result": tool_result["result"],
                             "error": tool_result.get("error"),
                             "execution_time": tool_result["execution_time"]
