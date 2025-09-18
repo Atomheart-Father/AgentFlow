@@ -16,8 +16,110 @@ from config import get_config
 from telemetry import get_telemetry_logger, TelemetryStage, TelemetryEvent
 from .post_mortem_logger import get_post_mortem_logger
 from logger import get_logger
+from typing import Dict as TypingDict
+import uuid
 
 logger = get_logger()
+
+
+class ActiveTask:
+    """活动任务状态"""
+    def __init__(self):
+        self.plan: Optional[PlannerOutput] = None
+        self.execution_state: Optional[ExecutionState] = None
+        self.iteration_count: int = 0
+        self.plan_iterations: int = 0
+        self.total_tool_calls: int = 0
+        self.created_at: float = time.time()
+        self.last_activity: float = time.time()
+
+    def is_active(self) -> bool:
+        """检查任务是否仍然活跃"""
+        return self.plan is not None and time.time() - self.last_activity < 3600  # 1小时超时
+
+    def update_activity(self):
+        """更新最后活动时间"""
+        self.last_activity = time.time()
+
+
+class PendingAsk:
+    """挂起的问题状态"""
+    def __init__(self, ask_id: str, question: str, expects: str):
+        self.ask_id = ask_id
+        self.question = question
+        self.expects = expects  # 期望的答案类型，如 "city|date|..."
+        self.ts = time.time()
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "ask_id": self.ask_id,
+            "question": self.question,
+            "expects": self.expects,
+            "ts": self.ts
+        }
+
+
+class SessionState:
+    """会话状态"""
+    def __init__(self):
+        self.active_task: Optional[ActiveTask] = None
+        self.pending_ask: Optional[PendingAsk] = None
+        self.session_id: str = str(uuid.uuid4())
+        self.created_at: float = time.time()
+
+    def has_pending_ask(self) -> bool:
+        """检查是否有挂起的问题"""
+        return self.pending_ask is not None
+
+    def set_pending_ask(self, question: str, expects: str):
+        """设置挂起的问题"""
+        ask_id = str(uuid.uuid4())
+        self.pending_ask = PendingAsk(ask_id, question, expects)
+        logger.info(f"设置挂起问题: {question} (期望: {expects})")
+
+    def clear_pending_ask(self):
+        """清除挂起的问题"""
+        if self.pending_ask:
+            logger.info(f"清除挂起问题: {self.pending_ask.question}")
+            self.pending_ask = None
+
+    def start_new_task(self):
+        """开始新任务"""
+        self.active_task = ActiveTask()
+        self.clear_pending_ask()
+        logger.info("开始新任务")
+
+    def end_task(self):
+        """结束当前任务"""
+        if self.active_task:
+            logger.info("结束当前任务")
+        self.active_task = None
+        self.clear_pending_ask()
+
+
+# 全局会话存储
+_sessions: TypingDict[str, SessionState] = {}
+
+
+def get_session(session_id: str) -> SessionState:
+    """获取或创建会话"""
+    if session_id not in _sessions:
+        _sessions[session_id] = SessionState()
+        _sessions[session_id].session_id = session_id
+        logger.info(f"创建新会话: {session_id}")
+    return _sessions[session_id]
+
+
+def cleanup_old_sessions():
+    """清理过期的会话（可选，后台任务）"""
+    current_time = time.time()
+    expired_sessions = [
+        sid for sid, session in _sessions.items()
+        if current_time - session.created_at > 86400  # 24小时
+    ]
+    for sid in expired_sessions:
+        del _sessions[sid]
+        logger.info(f"清理过期会话: {sid}")
 
 
 class OrchestratorState(Enum):
@@ -89,19 +191,197 @@ class Orchestrator:
 
         logger.info(f"编排器初始化完成: max_plan_iters={self.max_plan_iters}, max_total_tool_calls={self.max_total_tool_calls}")
 
-    async def orchestrate(self, user_query: str, context: Dict[str, Any] = None) -> OrchestratorResult:
+    def process_message(self, user_query: str, session_id: str, context: Dict[str, Any] = None) -> OrchestratorResult:
+        """
+        处理用户消息 - 主入口，支持会话状态管理
+
+        Args:
+            user_query: 用户查询
+            session_id: 会话ID
+            context: 上下文信息
+
+        Returns:
+            处理结果
+        """
+        session = get_session(session_id)
+
+        # 判断是继续任务还是新任务
+        if session.has_pending_ask():
+            # 有挂起的问题，这是继续任务
+            return self._resume_with_answer(user_query, session)
+        else:
+            # 检查是否有活跃任务且用户要开始新任务（这会忽略挂起的问题）
+            if session.active_task and session.active_task.is_active() and self._is_new_task_request(user_query):
+                # Telemetry: 用户忽略了活跃任务，开始新任务
+                self.telemetry.log_event(
+                    stage=TelemetryStage.ASK_USER,
+                    event=TelemetryEvent.ASK_USER_IGNORED,
+                    user_query=user_query,
+                    context={
+                        "reason": "new_task_requested_with_active_task",
+                        "had_active_task": True,
+                        "task_age_seconds": time.time() - session.active_task.created_at
+                    }
+                )
+                session.end_task()  # 结束旧任务
+
+            # 检查是否有活跃任务
+            if session.active_task and session.active_task.is_active():
+                # 继续现有任务
+                return self._continue_task(user_query, session)
+            else:
+                # 开始新任务
+                return self._start_new_task(user_query, session, context)
+
+    def _is_new_task_request(self, user_query: str) -> bool:
+        """检查是否是新任务请求"""
+        new_task_keywords = [
+            "新的问题", "new question", "reset", "重来", "重新开始",
+            "新任务", "new task", "clear", "清除"
+        ]
+        query_lower = user_query.lower().strip()
+        return any(keyword in query_lower for keyword in new_task_keywords)
+
+    def _is_task_termination(self, user_query: str) -> bool:
+        """检查是否是任务终止请求"""
+        termination_keywords = [
+            "结束", "结束任务", "拜拜", "再见", "结束对话", "停止",
+            "end", "bye", "goodbye", "stop", "quit"
+        ]
+        query_lower = user_query.lower().strip()
+        return any(keyword in query_lower for keyword in termination_keywords)
+
+    def _start_new_task(self, user_query: str, session: SessionState, context: Dict[str, Any] = None) -> OrchestratorResult:
+        """开始新任务"""
+        session.start_new_task()
+        return self.orchestrate(user_query, context, session.active_task)
+
+    def _continue_task(self, user_query: str, session: SessionState) -> OrchestratorResult:
+        """继续现有任务"""
+        if not session.active_task:
+            # 不应该发生的情况
+            return self._start_new_task(user_query, session)
+
+        # 检查是否是任务终止
+        if self._is_task_termination(user_query):
+            session.end_task()
+            result = OrchestratorResult()
+            result.status = "terminated"
+            result.final_answer = "任务已结束。如有其他问题，请随时询问！"
+            return result
+
+        # 继续现有任务
+        session.active_task.update_activity()
+        return self.orchestrate(user_query, None, session.active_task)
+
+    def _resume_with_answer(self, user_answer: str, session: SessionState) -> OrchestratorResult:
+        """使用用户答案恢复任务"""
+        if not session.pending_ask or not session.active_task:
+            # 不应该发生的情况
+            session.clear_pending_ask()
+            return self._start_new_task(user_answer, session)
+
+        # 记录用户答案
+        pending_ask = session.pending_ask
+        logger.info(f"收到用户答案: {user_answer} (针对问题: {pending_ask.question})")
+
+        # 清除挂起状态
+        session.clear_pending_ask()
+
+        # 将答案填入execution state
+        if not session.active_task.execution_state:
+            session.active_task.execution_state = ExecutionState()
+
+        # 根据期望的答案类型设置参数
+        if "city" in pending_ask.expects.lower():
+            session.active_task.execution_state.set_artifact("user_city", user_answer)
+        elif "date" in pending_ask.expects.lower():
+            session.active_task.execution_state.set_artifact("user_date", user_answer)
+        else:
+            session.active_task.execution_state.set_artifact("user_answer", user_answer)
+
+        # 强制重新规划
+        return await self._force_replan(session.active_task)
+
+    async def _force_replan(self, active_task: ActiveTask) -> OrchestratorResult:
+        """强制重新规划当前任务"""
+        if not active_task or not active_task.execution_state:
+            # 创建新的编排结果
+            result = OrchestratorResult()
+            result.status = "error"
+            result.error_message = "无法重新规划：缺少任务状态"
+            return result
+
+        try:
+            # 使用execution state中的信息重新规划
+            # 构建包含用户回答的上下文
+            user_city = active_task.execution_state.get_artifact("user_city")
+            user_date = active_task.execution_state.get_artifact("user_date")
+            user_answer = active_task.execution_state.get_artifact("user_answer")
+
+            # 构建增强的上下文
+            enhanced_context = {}
+            if user_city:
+                enhanced_context["user_city"] = user_city
+            if user_date:
+                enhanced_context["user_date"] = user_date
+            if user_answer:
+                enhanced_context["user_answer"] = user_answer
+
+            # 创建一个描述性的查询，包含用户提供的信息
+            context_parts = []
+            if user_city:
+                context_parts.append(f"城市: {user_city}")
+            if user_date:
+                context_parts.append(f"日期: {user_date}")
+            if user_answer:
+                context_parts.append(f"用户回答: {user_answer}")
+
+            replan_query = f"继续执行任务。用户提供的信息: {'; '.join(context_parts)}"
+
+            # 重新规划并执行
+            return await self.orchestrate(replan_query, enhanced_context, active_task)
+
+        except Exception as e:
+            logger.error(f"强制重新规划失败: {e}")
+
+            # Telemetry: 记录REPLAN失败
+            self.telemetry.log_event(
+                stage=TelemetryStage.ASK_USER,
+                event=TelemetryEvent.PLANNER_NON_JSON,  # 复用这个事件类型
+                user_query="replan_after_user_answer",
+                context={"error": str(e), "stage": "force_replan"}
+            )
+
+            # 返回错误结果
+            result = OrchestratorResult()
+            result.status = "error"
+            result.error_message = f"重新规划失败: {str(e)}"
+            return result
+
+    async def orchestrate(self, user_query: str, context: Dict[str, Any] = None, active_task: ActiveTask = None) -> OrchestratorResult:
         """
         执行完整的编排流程
 
         Args:
             user_query: 用户查询
             context: 上下文信息
+            active_task: 现有活动任务（可选）
 
         Returns:
             OrchestratorResult: 执行结果
         """
         result = OrchestratorResult()
         start_time = time.time()
+
+        # 使用现有任务或创建新结果
+        if active_task:
+            # 从现有任务恢复状态
+            result.final_plan = active_task.plan
+            result.execution_state = active_task.execution_state
+            result.iteration_count = active_task.iteration_count
+            result.plan_iterations = active_task.plan_iterations
+            result.total_tool_calls = active_task.total_tool_calls
 
         # 开始备现身复盘会话
         session_id = f"session_{int(time.time())}_{hash(user_query) % 10000}"
@@ -173,9 +453,10 @@ class Orchestrator:
                     current_state = await self._judge_phase(result.final_plan, result.execution_state, result)
 
                 elif current_state == OrchestratorState.ASK_USER:
-                    # ASK_USER状态：等待用户输入，然后回到PLAN
-                    logger.info("等待用户回答问题")
+                    # ASK_USER状态：设置pending_ask并等待用户输入
+                    logger.info("设置pending_ask状态，等待用户回答问题")
                     result.status = "waiting_for_user"
+                    # pending_ask会在UI层通过session状态管理
                     break
 
                 self.post_mortem_logger.log_phase_end(current_state.value, "completed")

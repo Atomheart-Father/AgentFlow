@@ -77,12 +77,10 @@ class Executor:
         self.llm = create_llm_interface_with_keys()
         if hasattr(self.llm.config, 'model_provider'):
             # 强制使用executor模型配置
-            original_provider = self.llm.config.model_provider
             self.llm.config.model_provider = "deepseek"
             if hasattr(self.llm.config, 'deepseek_model'):
-                original_model = self.llm.config.deepseek_model
                 self.llm.config.deepseek_model = config.executor_model
-                logger.info(f"Executor使用执行模型: {original_model} -> {config.executor_model}")
+                logger.info(f"Executor使用执行模型: {config.executor_model}")
 
         self.tools = get_tools()
         self.max_tool_calls_per_step = 2

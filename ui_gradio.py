@@ -14,6 +14,7 @@ from typing import List, Tuple, Dict, Any, Optional
 from agent_core import create_agent_core_with_llm
 from config import get_config
 from logger import setup_logging, get_logger
+from orchestrator import get_orchestrator
 
 # 初始化日志
 config = get_config()
@@ -35,9 +36,13 @@ class ChatUI:
         # 临时内存存储，未来替换为RAG查询
         self.temp_conversation_cache: Dict[str, Dict[str, Any]] = {}
 
-        # 默认使用传统模式
-        self.use_m3_mode = False
-        self.agent = create_agent_core_with_llm(use_m3=False)
+        # 会话状态管理
+        self.session_id: Optional[str] = None
+
+        # 默认使用M3编排器模式
+        self.use_m3_mode = True
+        self.agent = create_agent_core_with_llm(use_m3=True)
+        self.orchestrator = get_orchestrator()
 
         # 心跳机制
         self.heartbeat_thread = None
@@ -90,13 +95,15 @@ class ChatUI:
             self.use_m3_mode = use_m3
             # 重新创建Agent实例
             self.agent = create_agent_core_with_llm(use_m3=use_m3)
+            if use_m3:
+                self.orchestrator = get_orchestrator()
             logger.info(f"AI助手模式已切换为: {'M3编排器' if use_m3 else '传统模式'}")
             return f"✅ 已切换到 {'M3编排器模式' if use_m3 else '传统模式'}"
         return f"当前已经是 {'M3编排器模式' if use_m3 else '传统模式'}"
 
     async def process_user_message(self, user_input: str, chat_history) -> Tuple[str, List[Tuple[str, str]], str]:
         """
-        处理用户消息
+        处理用户消息 - 使用会话状态管理
 
         Args:
             user_input: 用户输入
@@ -111,41 +118,57 @@ class ChatUI:
         # 更新活动时间
         self.update_activity()
 
-        # 清理可能的残留状态
-        if hasattr(self.agent, 'pending_ask_user'):
-            logger.warning("检测到残留的pending_ask_user状态，正在清理")
-            delattr(self.agent, 'pending_ask_user')
+        # 初始化会话ID（如果还没有）
+        if self.session_id is None:
+            self.session_id = str(uuid.uuid4())
+            logger.info(f"创建新会话: {self.session_id}")
 
-        logger.info(f"收到用户输入: {user_input[:100]}{'...' if len(user_input) > 100 else ''}")
+        logger.info(f"收到用户输入 (会话{self.session_id}): {user_input[:100]}{'...' if len(user_input) > 100 else ''}")
 
         try:
-            # 检查是否是用户回答ask_user工具的问题
-            if hasattr(self.agent, 'pending_ask_user'):
-                # 如果有待回答的ask_user问题，先处理用户回答
-                answer = user_input.strip()
-                logger.info(f"处理用户对ask_user工具的回答: {answer}")
+            if self.use_m3_mode and self.orchestrator:
+                # 使用M3编排器的会话状态管理
+                result = await self.orchestrator.process_message(user_input, self.session_id)
 
-                # 处理用户对ask_user的回答
-                original_input = self.agent.pending_ask_user.get('original_input', '')
-                question = self.agent.pending_ask_user.get('question', '问题')
+                # 处理结果
+                if result.status == "waiting_for_user":
+                    # 等待用户回答问题 - 设置session的pending_ask状态
+                    from orchestrator import get_session
+                    session = get_session(self.session_id)
 
-                # 清除pending状态
-                delattr(self.agent, 'pending_ask_user')
+                    if result.pending_questions:
+                        question = result.pending_questions[0]  # 取第一个问题
+                        # 推断期望的答案类型
+                        expects = "user_input"
+                        if "城市" in question or "city" in question.lower():
+                            expects = "city"
+                        elif "日期" in question or "date" in question.lower():
+                            expects = "date"
 
-                # 构造包含用户回答的新查询
-                enhanced_query = f"{original_input}\n\n用户回答: {answer}"
+                        session.set_pending_ask(question, expects)
 
-                # 更新最后一个AI消息，显示用户已回答，然后继续处理
-                if chat_history and chat_history[-1][1].startswith("🤔"):
-                    chat_history[-1] = (f"🤔 {question}", f"✅ 已回答: {answer}\n\n正在继续处理...")
-
-                return await self._process_stream(enhanced_query, chat_history, is_followup=True)
+                        message = f"🤔 {question}\n\n请在输入框中直接回复，我将继续为您处理请求。"
+                        chat_history.append((user_input, message))
+                        tool_trace_text = f"🕐 等待用户回答问题..."
+                    else:
+                        chat_history.append((user_input, "等待用户输入..."))
+                        tool_trace_text = "🕐 等待用户回答"
+                elif result.status == "terminated":
+                    # 任务已结束
+                    chat_history.append((user_input, result.final_answer or "任务已结束"))
+                    tool_trace_text = "✅ 任务已结束"
+                elif result.final_answer:
+                    # 有最终答案
+                    chat_history.append((user_input, result.final_answer))
+                    tool_trace_text = self._generate_tool_trace(result)
+                else:
+                    # 其他状态
+                    chat_history.append((user_input, f"处理完成 (状态: {result.status})"))
+                    tool_trace_text = f"状态: {result.status}"
 
             else:
-                # 正常处理用户查询
-                # 先显示用户输入，然后使用流式处理
-                chat_history.append((user_input, ""))
-                return await self._process_stream(user_input, chat_history)
+                # 使用传统模式（原有逻辑）
+                return await self._process_traditional(user_input, chat_history)
 
         except Exception as e:
             error_msg = f"处理消息时发生错误: {str(e)}"
@@ -156,6 +179,36 @@ class ChatUI:
 
         # 支持多轮对话，不清空输入框
         return None, chat_history, tool_trace_text
+
+    async def _process_traditional(self, user_input: str, chat_history) -> Tuple[str, List[Tuple[str, str]], str]:
+        """传统模式处理（向后兼容）"""
+        # 检查是否是用户回答ask_user工具的问题
+        if hasattr(self.agent, 'pending_ask_user'):
+            # 如果有待回答的ask_user问题，先处理用户回答
+            answer = user_input.strip()
+            logger.info(f"处理用户对ask_user工具的回答: {answer}")
+
+            # 处理用户对ask_user的回答
+            original_input = self.agent.pending_ask_user.get('original_input', '')
+            question = self.agent.pending_ask_user.get('question', '问题')
+
+            # 清除pending状态
+            delattr(self.agent, 'pending_ask_user')
+
+            # 构造包含用户回答的新查询
+            enhanced_query = f"{original_input}\n\n用户回答: {answer}"
+
+            # 更新最后一个AI消息，显示用户已回答，然后继续处理
+            if chat_history and chat_history[-1][1].startswith("🤔"):
+                chat_history[-1] = (f"🤔 {question}", f"✅ 已回答: {answer}\n\n正在继续处理...")
+
+            return await self._process_stream(enhanced_query, chat_history, is_followup=True)
+
+        else:
+            # 正常处理用户查询
+            # 先显示用户输入，然后使用流式处理
+            chat_history.append((user_input, ""))
+            return await self._process_stream(user_input, chat_history)
 
     async def _process_stream(self, user_input: str, chat_history, is_followup: bool = False) -> Tuple[str, List[Tuple[str, str]], str]:
         """
@@ -533,6 +586,38 @@ class ChatUI:
 
                 if trace.get("error"):
                     trace_lines.append(f"   错误: {trace['error'][:100]}...")
+
+        return "\n".join(trace_lines)
+
+    def _generate_tool_trace(self, result) -> str:
+        """生成工具轨迹文本"""
+        if not hasattr(result, 'execution_state') or not result.execution_state:
+            return "本次对话未使用任何工具"
+
+        artifacts = result.execution_state.artifacts
+        if not artifacts:
+            return "本次对话未使用任何工具"
+
+        trace_lines = ["🛠️ 工具调用轨迹:"]
+        tool_count = 0
+
+        for key, value in artifacts.items():
+            if key.startswith(('user_', 'system_')):
+                continue  # 跳过用户输入和系统信息
+
+            tool_count += 1
+            if isinstance(value, dict) and 'ok' in value:
+                # StandardToolResult格式
+                status = "✅" if value.get('ok') else "❌"
+                tool_name = value.get('meta', {}).get('source', key)
+                latency = value.get('meta', {}).get('latency_ms', 0)
+                trace_lines.append(f"{tool_count}. {status} {tool_name} ({latency:.0f}ms)")
+            else:
+                # 其他格式
+                trace_lines.append(f"{tool_count}. ✅ {key}")
+
+        if tool_count == 0:
+            return "本次对话未使用任何工具"
 
         return "\n".join(trace_lines)
 
