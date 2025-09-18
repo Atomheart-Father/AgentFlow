@@ -583,6 +583,7 @@ class Orchestrator:
 
                     session.active_task = active_task
                     logger.info(f"已保存active_task到session {session_id}")
+                    print(f"[DEBUG] orchestrator保存active_task - session_id: {session_id}, active_task: {active_task is not None}")
 
             # 结束备现身复盘会话
             final_result = {

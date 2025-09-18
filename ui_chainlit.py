@@ -124,10 +124,28 @@ async def handle_resume_with_answer(user_answer: str, session_id: str):
     session.clear_pending_ask()
 
     try:
+        # 调试信息：检查session状态
+        print(f"[DEBUG] 续跑开始 - session_id: {session_id}")
+        print(f"[DEBUG] session.active_task: {session.active_task}")
+        print(f"[DEBUG] session.pending_ask: {session.pending_ask}")
+        print(f"[DEBUG] session id: {id(session)}")
+        print(f"[DEBUG] session type: {type(session)}")
+
         # 确保session有active_task状态
         if not session.active_task:
-            await cl.Message(content="❌ 会话状态丢失，请重新开始任务", author="助手").send()
-            return
+            # 尝试从全局会话存储中恢复
+            from orchestrator.orchestrator import _sessions
+            if session_id in _sessions:
+                global_session = _sessions[session_id]
+                if global_session.active_task:
+                    session.active_task = global_session.active_task
+                    print(f"[DEBUG] 从全局存储恢复active_task成功")
+                else:
+                    print(f"[DEBUG] 全局存储中也没有active_task")
+
+            if not session.active_task:
+                await cl.Message(content="❌ 会话状态丢失，请重新开始任务", author="助手").send()
+                return
 
         # 将用户答案设置到active_task的execution_state中
         if session.active_task.execution_state:

@@ -713,7 +713,7 @@ class AgentCore:
                     session.active_task.iteration_count = orchestrator_result.iteration_count
                     session.active_task.plan_iterations = orchestrator_result.plan_iterations
                     session.active_task.total_tool_calls = orchestrator_result.total_tool_calls
-                    print(f"[DEBUG] 为session {session_id} 创建了active_task")
+                    print(f"[DEBUG] agent_core创建active_task - session_id: {session_id}, active_task: {session.active_task is not None}")
 
             # 检查是否处于ask_user状态
             if orchestrator_result.status == "ask_user" and orchestrator_result.execution_state:
