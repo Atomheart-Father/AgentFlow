@@ -24,9 +24,24 @@ class Config:
         self.deepseek_api_key = os.getenv("DEEPSEEK_API_KEY", "")
         self.deepseek_base_url = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
 
+        # 模型分工配置
+        self.planner_model = os.getenv("PLANNER_MODEL", "deepseek-reasoner")
+        self.planner_temperature = float(os.getenv("PLANNER_TEMPERATURE", "0.2"))
+        self.judge_model = os.getenv("JUDGE_MODEL", "deepseek-reasoner")
+        self.judge_temperature = float(os.getenv("JUDGE_TEMPERATURE", "0.2"))
+        self.executor_model = os.getenv("EXECUTOR_MODEL", "deepseek-chat")
+        self.executor_temperature = float(os.getenv("EXECUTOR_TEMPERATURE", "0.1"))
+
+        # 目录配置
+        self.desktop_dir = os.getenv("DESKTOP_DIR", "~/Desktop/AgentFlow")
+        # 解析桌面目录路径
+        self.desktop_dir_path = Path(self.desktop_dir).expanduser().resolve()
+
         # 功能开关
         self.rag_enabled = os.getenv("RAG_ENABLED", "false").lower() == "true"
         self.tools_enabled = os.getenv("TOOLS_ENABLED", "false").lower() == "true"
+        self.use_m3_orchestrator = os.getenv("USE_M3_ORCHESTRATOR", "true").lower() == "true"
+        self.strict_json_mode = os.getenv("STRICT_JSON_MODE", "true").lower() == "true"
 
         # 日志配置
         self.log_level = os.getenv("LOG_LEVEL", "INFO")
@@ -36,6 +51,13 @@ class Config:
         self.temperature = float(os.getenv("TEMPERATURE", "0.7"))
         self.timeout_seconds = int(os.getenv("TIMEOUT_SECONDS", "30"))
         self.max_retries = int(os.getenv("MAX_RETRIES", "3"))
+
+        # M3 Orchestrator 参数
+        self.max_tool_calls_per_act = int(os.getenv("MAX_TOOL_CALLS_PER_ACT", "15"))
+        self.max_total_tool_calls = int(os.getenv("MAX_TOTAL_TOOL_CALLS", "6"))
+        self.max_plan_iters = int(os.getenv("MAX_PLAN_ITERS", "2"))
+        self.max_latency_ms = int(os.getenv("MAX_LATENCY_MS", "60000"))
+        self.max_tokens_per_stage = int(os.getenv("MAX_TOKENS_PER_STAGE", "4000"))
 
     def validate(self, require_api_keys=True):
         """验证配置
@@ -66,6 +88,15 @@ class Config:
         # 验证DeepSeek模型选择
         if self.model_provider == "deepseek" and self.deepseek_model not in ["deepseek-chat", "deepseek-reasoner"]:
             errors.append(f"无效的DEEPSEEK_MODEL: {self.deepseek_model} (应为 deepseek-chat 或 deepseek-reasoner)")
+
+        # 验证分工模型
+        valid_models = ["deepseek-chat", "deepseek-reasoner"]
+        if self.planner_model not in valid_models:
+            errors.append(f"无效的PLANNER_MODEL: {self.planner_model} (应为 {valid_models})")
+        if self.judge_model not in valid_models:
+            errors.append(f"无效的JUDGE_MODEL: {self.judge_model} (应为 {valid_models})")
+        if self.executor_model not in valid_models:
+            errors.append(f"无效的EXECUTOR_MODEL: {self.executor_model} (应为 {valid_models})")
 
         if errors:
             raise ValueError("配置错误: " + ", ".join(errors))

@@ -111,7 +111,7 @@ def load_tools(whitelist: List[str] = None) -> List[Tool]:
     return tools
 
 
-def execute_tool(tool_name: str, tools: List[Tool], **kwargs) -> Union[Dict[str, Any], str]:
+def execute_tool(tool_name: str, tools: List[Tool], **kwargs) -> 'StandardToolResult':
     """
     执行指定工具
 
@@ -121,11 +121,13 @@ def execute_tool(tool_name: str, tools: List[Tool], **kwargs) -> Union[Dict[str,
         **kwargs: 工具参数
 
     Returns:
-        工具执行结果
+        标准化的工具结果
 
     Raises:
-        ToolError: 工具执行失败
+        ToolError: 工具不存在或其他严重错误
     """
+    from schemas.tool_result import StandardToolResult, ToolError as ToolResultError, create_tool_error, create_tool_meta, ErrorCode
+
     # 查找工具
     tool = None
     for t in tools:
@@ -142,8 +144,9 @@ def execute_tool(tool_name: str, tools: List[Tool], **kwargs) -> Union[Dict[str,
         # 检查是否是异步方法
         import asyncio
         import inspect
+        import time
 
-        # 为不同工具设置不同的超时时间
+        start_time = time.time()
         tool_timeout = self._get_tool_timeout(tool_name)
 
         if inspect.iscoroutinefunction(tool.run):
@@ -160,24 +163,41 @@ def execute_tool(tool_name: str, tools: List[Tool], **kwargs) -> Union[Dict[str,
                     result = loop.run_until_complete(tool.run(**kwargs))
             except concurrent.futures.TimeoutError:
                 logger.warning(f"工具 {tool_name} 执行超时 ({tool_timeout}s)")
-                result = self._get_tool_timeout_default(tool_name)
+                latency_ms = int((time.time() - start_time) * 1000)
+                error = create_tool_error(ErrorCode.INTERNAL, f"工具执行超时 ({tool_timeout}s)", retryable=True)
+                meta = create_tool_meta(tool_name, latency_ms, kwargs)
+                return StandardToolResult.failure(error, meta)
             except Exception as async_e:
                 logger.warning(f"异步执行失败，尝试同步执行: {async_e}")
                 try:
                     result = tool.run(**kwargs)
                 except Exception as sync_e:
                     logger.error(f"同步执行也失败: {sync_e}")
-                    result = self._get_tool_timeout_default(tool_name)
+                    latency_ms = int((time.time() - start_time) * 1000)
+                    error = create_tool_error(ErrorCode.INTERNAL, f"工具执行失败: {str(sync_e)}", retryable=True)
+                    meta = create_tool_meta(tool_name, latency_ms, kwargs)
+                    return StandardToolResult.failure(error, meta)
         else:
             # 同步方法，直接调用
             try:
                 result = tool.run(**kwargs)
             except Exception as sync_e:
                 logger.error(f"同步工具执行失败: {sync_e}")
-                result = self._get_tool_timeout_default(tool_name)
+                latency_ms = int((time.time() - start_time) * 1000)
+                error = create_tool_error(ErrorCode.INTERNAL, f"工具执行失败: {str(sync_e)}", retryable=True)
+                meta = create_tool_meta(tool_name, latency_ms, kwargs)
+                return StandardToolResult.failure(error, meta)
 
-        logger.info(f"工具 {tool_name} 执行成功")
-        return result
+        # 检查结果是否已经是StandardToolResult
+        if isinstance(result, StandardToolResult):
+            logger.info(f"工具 {tool_name} 执行成功")
+            return result
+        else:
+            # 如果工具还没有更新为返回StandardToolResult，包装结果
+            logger.warning(f"工具 {tool_name} 返回了非标准格式结果，正在包装")
+            latency_ms = int((time.time() - start_time) * 1000)
+            meta = create_tool_meta(tool_name, latency_ms, kwargs)
+            return StandardToolResult.success({"result": result}, meta)
 
     except Exception as e:
         error_msg = f"工具执行失败: {str(e)}"
@@ -191,12 +211,14 @@ def execute_tool(tool_name: str, tools: List[Tool], **kwargs) -> Union[Dict[str,
         """获取工具的超时时间"""
         # 为不同工具设置不同的超时时间
         timeouts = {
-            "weather_get": 15.0,  # 天气查询15秒
-            "time_now": 5.0,      # 时间查询5秒
-            "file_read": 10.0,    # 文件读取10秒
-            "calendar_read": 8.0, # 日程读取8秒
-            "email_list": 12.0,   # 邮件查询12秒
-            "math_calc": 3.0,     # 数学计算3秒
+            "weather_get": 15.0,     # 天气查询15秒
+            "time_now": 5.0,         # 时间查询5秒
+            "file_read": 10.0,       # 文件读取10秒
+            "fs_write": 10.0,        # 文件写入10秒
+            "date_normalize": 3.0,   # 日期归一化3秒
+            "calendar_read": 8.0,    # 日程读取8秒
+            "email_list": 12.0,      # 邮件查询12秒
+            "math_calc": 3.0,        # 数学计算3秒
         }
         return timeouts.get(tool_name, 10.0)  # 默认10秒
 
@@ -206,6 +228,7 @@ def execute_tool(tool_name: str, tools: List[Tool], **kwargs) -> Union[Dict[str,
             "weather_get": {"error": "天气查询超时，无法获取天气信息"},
             "time_now": {"error": "时间查询超时，无法获取当前时间"},
             "file_read": {"error": "文件读取超时，无法获取文件内容"},
+            "fs_write": {"error": "文件写入超时，无法写入文件"},
             "calendar_read": {"error": "日程查询超时，无法获取日程信息"},
             "email_list": {"error": "邮件查询超时，无法获取邮件列表"},
             "math_calc": {"error": "数学计算超时，无法计算结果"},
@@ -249,16 +272,18 @@ def _load_tools(whitelist: List[str] = None) -> List[Tool]:
         "tools.tool_email",
         "tools.tool_file_reader",
         "tools.tool_file_writer",
+        "tools.tool_fs_write",
         "tools.tool_math",
         "tools.tool_websearch",
         "tools.tool_datetime",
+        "tools.tool_date_utils",
         "tools.tool_ask_user",
     ]
 
     for module_name in tool_modules:
         try:
             logger.debug(f"加载工具模块: {module_name}")
-            module = __import__(module_name, fromlist=["ToolWeather", "ToolTime", "ToolCalculator", "ToolCalendar", "ToolEmail", "ToolFileReader", "ToolFileWriter", "ToolMath", "ToolWebSearch", "ToolDateTime", "ToolAskUser"])
+            module = __import__(module_name, fromlist=["ToolWeather", "ToolTime", "ToolCalculator", "ToolCalendar", "ToolEmail", "ToolFileReader", "ToolFileWriter", "ToolFSWrite", "ToolMath", "ToolWebSearch", "ToolDateTime", "ToolDateNormalizer", "ToolAskUser"])
 
             # 获取工具类
             tool_classes = []
@@ -395,12 +420,14 @@ class ToolExecutor:
         """获取工具的超时时间"""
         # 为不同工具设置不同的超时时间
         timeouts = {
-            "weather_get": 15.0,  # 天气查询15秒
-            "time_now": 5.0,      # 时间查询5秒
-            "file_read": 10.0,    # 文件读取10秒
-            "calendar_read": 8.0, # 日程读取8秒
-            "email_list": 12.0,   # 邮件查询12秒
-            "math_calc": 3.0,     # 数学计算3秒
+            "weather_get": 15.0,     # 天气查询15秒
+            "time_now": 5.0,         # 时间查询5秒
+            "file_read": 10.0,       # 文件读取10秒
+            "fs_write": 10.0,        # 文件写入10秒
+            "date_normalize": 3.0,   # 日期归一化3秒
+            "calendar_read": 8.0,    # 日程读取8秒
+            "email_list": 12.0,      # 邮件查询12秒
+            "math_calc": 3.0,        # 数学计算3秒
         }
         return timeouts.get(tool_name, 10.0)  # 默认10秒
 
@@ -410,6 +437,7 @@ class ToolExecutor:
             "weather_get": {"error": "天气查询超时，无法获取天气信息"},
             "time_now": {"error": "时间查询超时，无法获取当前时间"},
             "file_read": {"error": "文件读取超时，无法获取文件内容"},
+            "fs_write": {"error": "文件写入超时，无法写入文件"},
             "calendar_read": {"error": "日程查询超时，无法获取日程信息"},
             "email_list": {"error": "邮件查询超时，无法获取邮件列表"},
             "math_calc": {"error": "数学计算超时，无法计算结果"},

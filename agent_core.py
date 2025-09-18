@@ -12,6 +12,8 @@ from config import get_config
 from logger import get_logger
 from tool_registry import get_tools, execute_tool, ToolError, to_openai_tools
 
+logger = get_logger()
+
 # M3编排器相关导入
 try:
     from orchestrator import get_orchestrator, orchestrate_query, OrchestratorResult
@@ -19,8 +21,6 @@ try:
 except ImportError:
     M3_AVAILABLE = False
     logger.warning("M3编排器模块不可用，将使用传统模式")
-
-logger = get_logger()
 
 
 class AgentCore:
@@ -503,6 +503,75 @@ class AgentCore:
                 "type": "error",
                 "error": f"处理请求时发生错误: {str(e)}"
             }
+
+    async def _process_with_m3_stream(self, user_query: str, context: Optional[Dict[str, Any]] = None):
+        """使用M3编排器处理查询（真·流式：assistant_content进聊天气泡，其他事件进状态栏）"""
+        if not hasattr(self, 'orchestrator') or not self.orchestrator:
+            yield {"type": "error", "message": "M3编排器未初始化"}
+            return
+
+        try:
+            # 状态：开始规划
+            yield {"type": "status", "message": "正在规划任务"}
+
+            # 执行编排
+            result = await self.orchestrator.orchestrate(user_query=user_query, context=context)
+
+            # 状态：开始执行
+            yield {"type": "status", "message": "正在执行任务"}
+
+            # 处理最终结果
+            final_content = ""
+
+            if result.final_answer:
+                # 有明确的最终答案
+                final_content = result.final_answer
+            elif result.status == "completed" and hasattr(result, 'execution_state') and result.execution_state:
+                # 任务完成但没有明确答案，从artifacts中构造有意义的响应
+                artifacts = result.execution_state.artifacts
+                response_parts = []
+
+                # 提取有用的信息
+                if "weather_data" in artifacts:
+                    weather = artifacts["weather_data"]
+                    if hasattr(weather, 'data') and weather.data:
+                        response_parts.append(f"天气信息: {weather.data}")
+                    elif isinstance(weather, dict):
+                        response_parts.append(f"天气信息: {weather}")
+
+                if "commute_tips" in artifacts:
+                    tips = artifacts["commute_tips"]
+                    if isinstance(tips, str):
+                        response_parts.append(f"通勤建议: {tips}")
+                    elif isinstance(tips, list):
+                        response_parts.append("通勤建议:\n" + "\n".join(f"- {tip}" for tip in tips))
+
+                if "file_path" in artifacts:
+                    response_parts.append("文件已保存到指定位置")
+
+                if response_parts:
+                    final_content = "\n\n".join(response_parts)
+                else:
+                    final_content = "任务已完成，所有步骤都已成功执行。"
+            else:
+                # 其他状态（如ask_user/waiting），不向聊天气泡写入误导性文本
+                final_content = ""
+
+            # 流式输出最终内容
+            if final_content:
+                chunk_size = 50  # 每批50个字符
+                for i in range(0, len(final_content), chunk_size):
+                    chunk = final_content[i:i+chunk_size]
+                    yield {"type": "assistant_content", "content": chunk}
+                    # 短暂延迟模拟流式效果
+                    await asyncio.sleep(0.01)
+
+            # 状态：处理完成
+            yield {"type": "status", "message": "处理完成"}
+
+        except Exception as e:
+            logger.error(f"M3流式处理失败: {e}")
+            yield {"type": "error", "message": f"处理失败: {str(e)}"}
 
     async def _process_with_m3(self, user_query: str, context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """

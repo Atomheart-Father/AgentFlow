@@ -8,7 +8,9 @@ from typing import Dict, Any, List, Optional
 from datetime import datetime
 
 from llm_interface import create_llm_interface_with_keys
-from schemas.plan import Plan, PlanValidationError, validate_plan
+from schemas.orchestrator import PlannerOutput, validate_planner_output, StepType
+from config import get_config
+from telemetry import get_telemetry_logger, TelemetryStage, TelemetryEvent
 from logger import get_logger
 
 logger = get_logger()
@@ -19,18 +21,25 @@ class Planner:
 
     def __init__(self):
         """初始化规划器"""
-        # 使用DeepSeek-R1进行推理规划
+        config = get_config()
+
+        # 使用配置中的Planner模型
         self.llm = create_llm_interface_with_keys()
-        # 强制使用deepseek-reasoner模型
-        if hasattr(self.llm.config, 'deepseek_model'):
-            original_model = self.llm.config.deepseek_model
-            self.llm.config.deepseek_model = "deepseek-reasoner"
-            logger.info(f"Planner切换到推理模型: {original_model} -> deepseek-reasoner")
+        if hasattr(self.llm.config, 'model_provider'):
+            # 强制使用planner模型配置
+            original_provider = self.llm.config.model_provider
+            self.llm.config.model_provider = "deepseek"
+            if hasattr(self.llm.config, 'deepseek_model'):
+                original_model = self.llm.config.deepseek_model
+                self.llm.config.deepseek_model = config.planner_model
+                logger.info(f"Planner切换模型: {original_model} -> {config.planner_model}")
 
         self.max_retries = 2
-        self.max_tokens = 2048
+        self.max_tokens = config.max_tokens_per_stage
+        self.temperature = config.planner_temperature
+        self.telemetry = get_telemetry_logger()
 
-    async def create_plan(self, user_query: str, context: Dict[str, Any] = None) -> Plan:
+    async def create_plan(self, user_query: str, context: Dict[str, Any] = None) -> PlannerOutput:
         """
         为用户查询创建执行计划
 
@@ -63,18 +72,40 @@ class Planner:
                 response = await self.llm.generate(
                     messages=messages,
                     force_json=True,  # 强制JSON输出
-                    max_tokens=self.max_tokens
+                    max_tokens=self.max_tokens,
+                    temperature=self.temperature
                 )
 
-                # 解析和验证计划
-                plan_data = self._parse_plan_response(response.content)
-                validated_plan = validate_plan(plan_data)
+                # 解析和验证计划（严格JSON模式）
+                validated_plan = validate_planner_output(response.content)
+
+                # 检查规划质量
+                if len(validated_plan.steps) == 0:
+                    # Telemetry: 空计划
+                    self.telemetry.log_event(
+                        stage=TelemetryStage.PLAN,
+                        event=TelemetryEvent.PLAN_EMPTY_OR_USELESS,
+                        user_query=user_query,
+                        context={"reason": "empty_plan", "raw_response": response.content[:500]},
+                        plan_excerpt={"goal": validated_plan.goal, "steps_count": 0},
+                        model={"planner": self.llm.config.deepseek_model}
+                    )
 
                 logger.info(f"✅ 规划成功，共 {len(validated_plan.steps)} 个步骤")
                 return validated_plan
 
-            except PlanValidationError as e:
+            except ValueError as e:
                 logger.warning(f"计划验证失败 (尝试 {attempt + 1}): {e}")
+
+                # Telemetry: 记录规划JSON验证失败
+                self.telemetry.log_event(
+                    stage=TelemetryStage.PLAN,
+                    event=TelemetryEvent.PLANNER_NON_JSON,
+                    user_query=user_query,
+                    context={"error": str(e), "attempt": attempt + 1, "raw_response": response.content[:500]},
+                    model={"planner": self.llm.config.deepseek_model}
+                )
+
                 if attempt < self.max_retries:
                     continue
                 else:
@@ -93,136 +124,79 @@ class Planner:
         raise Exception("规划失败，已达到最大重试次数")
 
     def _build_system_prompt(self) -> str:
-        """构建系统提示词"""
-        return """你是AI系统的规划专家。你的任务是：
-1. 分析用户查询，理解用户真正需要什么
-2. 制定详细的执行步骤来满足用户需求
-3. 每个步骤都要明确"预期产出"，便于后续验证
-4. 严格控制步骤数量（最多6步）
-5. 优先使用工具调用来获取准确信息
+        """构建系统提示词 - 只输出JSON"""
+        return """你是一个AI规划专家。分析用户查询并制定执行计划。
 
-可用工具及参数格式：
-- time_now: 获取当前时间信息
-  参数: {} (无需参数)
+你可以使用以下工具完成任务。凡是涉及"当前日期/时间/星期几/相对日期（今天/明天/后天/今晚等）"，先调用 time.now 获取基准时间（Europe/Amsterdam），再做日期归一化；不要向用户询问"今天几号"。凡是需要落盘的结果，调用 fs.write 写入 DESKTOP_DIR。遇到外部客观事实（天气等）优先用工具获取，主观偏好才用 AskUser。
 
-- weather_get: 查询天气
-  参数格式: {"location": "城市名"} (如北京、上海等)
+可用工具：
+- time_now: 获取当前日期和时间（Europe/Amsterdam时区）{}
+- weather_get: 查询天气 {"location": "城市名", "date": "YYYY-MM-DD"}
+- calendar_read: 查看日程 {"date": "YYYY-MM-DD"}
+- file_read: 读取文件 {"file_path": "路径"}
+- fs_write: 写入文件 {"path": "路径", "content": "内容", "format": "md"}
+- path_planner: 规划文件路径 {"filename": "report", "file_type": "md"}
+- ask_user: 询问用户 {"question": "问题"}
+- math_calc: 数学计算 {"expression": "表达式"}
+- web_search: 网络搜索 {"query": "搜索词", "max_results": 5}
 
-- calendar_read: 查看日程安排
-  参数格式: {"date": "YYYY-MM-DD"} (可选)
+规划规则：
+1. 日期时间强制使用工具：遇到任何"今天/明天/后天/星期几/当前时间"等，先调用time.now获取基准，再计算相对日期
+2. 文件路径规划：写文件前必须先用path_planner规划正确路径
+3. 工具优先级：time.now → 其他工具 → 已有上下文 → AskUser（仅主观信息）
+4. AskUser限制：只用于城市/预算/个人偏好等主观信息，绝不为日期/时间发问
+5. 组合策略：可先web_search给候选，再ask_user确认；或ask_user一次后超时转web_search
+6. 硬约束：单轮最多1个ask_user，web_search≤2次
 
-- email_list: 查看邮件
-  参数格式: {"limit": 10} (可选)
-
-- file_read: 读取文件内容
-  参数格式: {"file_path": "文件路径"}
-
-- file_write: 写入文件内容
-  参数格式: {"file_path": "文件路径（如'桌面/报告.md'、'下载/文件.txt'）", "content": "文件内容"}
-
-- ask_user: 询问用户信息
-  参数格式: {"question": "具体问题", "context": "上下文说明（可选）"}
-
-- math_calc: 执行数学计算
-  参数格式: {"expression": "计算表达式"}
-
-规划原则：
-- 工具调用步骤最多5次（支持更复杂的多步骤任务）
-- 每个步骤都要有明确的evidence预期
-- 依赖关系要清晰
-- 最终答案要基于工具结果
-- 使用最简单的参数格式，不要添加多余的描述
-
-信息获取策略：
-- 当需要获取用户信息时，使用ask_user工具询问用户
-- 不要假设用户的默认信息，总是通过ask_user工具获取必要信息
-- ask_user工具会触发前端交互界面，用户可以直接回复
-
-步骤类型选择：
-- tool_call: 调用工具获取信息（包括ask_user工具来询问用户信息）
-- process: 对已有信息进行分析处理
-
-请严格按照以下JSON格式输出计划，不要添加任何额外内容："""
+仅输出 JSON：{goal, success_criteria[], max_steps, steps[], final_answer_template}。steps[].type ∈ {"tool_call","summarize","write_file","ask_user"}，并写明 expect 和 output_key。禁止生成任何非 JSON 文本。"""
 
     def _build_user_prompt(self, user_query: str, context: Dict[str, Any]) -> str:
-        """构建用户提示词"""
-        prompt_parts = [
-            f"用户查询：{user_query}",
-            "",
-            "请制定执行计划，严格按照以下JSON格式：",
-            "",
-            "{",
-            '  "goal": "简要描述目标",',
-            '  "success_criteria": ["标准1", "标准2"],',
-            '  "max_steps": 6,',
-            '  "steps": [',
-            '    {',
-            '      "id": "s1",',
-            '      "type": "tool_call",',
-            '      "tool": "time_now",',
-            '      "inputs": {},',
-            '      "depends_on": [],',
-            '      "expect": "具体的证据预期",',
-            '      "output_key": "result_key",',
-            '      "retry": 1',
-            '    },',
-            '    {',
-            '      "id": "s2",',
-            '      "type": "tool_call",',
-            '      "tool": "ask_user",',
-            '      "inputs": {"question": "请告诉我您的位置"},',
-            '      "depends_on": [],',
-            '      "expect": "用户提供位置信息",',
-            '      "output_key": "user_location",',
-            '      "retry": 0',
-            '    }',
-            '  ],',
-            '  "final_answer_template": "最终答案模板 {{result_key}}"',
-            "}",
-            "",
-            "重要：只输出JSON，不要任何解释或额外内容！"
-        ]
+        """构建用户提示词 - 只输出JSON"""
+        return f"""为以下用户查询制定执行计划：
 
-        return "\n".join(prompt_parts)
+{user_query}
 
-    def _parse_plan_response(self, response: str) -> Dict[str, Any]:
-        """解析规划响应"""
-        try:
-            # 尝试直接解析JSON
-            return json.loads(response.strip())
-        except json.JSONDecodeError:
-            # 尝试提取JSON部分
-            import re
-            json_match = re.search(r'\{.*\}', response, re.DOTALL)
-            if json_match:
-                try:
-                    return json.loads(json_match.group())
-                except json.JSONDecodeError:
-                    pass
+输出JSON格式：
+{{
+  "goal": "任务目标",
+  "success_criteria": ["成功标准1", "成功标准2"],
+  "max_steps": 5,
+  "steps": [
+    {{
+      "id": "s1",
+      "type": "tool_call",
+      "tool": "weather_get",
+      "inputs": {{"location": "北京"}},
+      "depends_on": [],
+      "expect": "天气信息",
+      "output_key": "weather",
+      "retry": 0
+    }}
+  ],
+  "final_answer_template": "答案: {{weather}}"
+}}"""
 
-            # 如果都失败了，抛出异常
-            raise PlanValidationError(f"无法解析规划响应为JSON: {response[:200]}...")
-
-    def _create_fallback_plan(self, user_query: str) -> Plan:
+    def _create_fallback_plan(self, user_query: str) -> PlannerOutput:
         """创建后备计划"""
         logger.warning("使用后备计划")
 
         # 简单的后备计划：直接回答用户查询
-        return Plan(
+        from schemas.orchestrator import PlanStep
+
+        return PlannerOutput(
             goal=f"回答用户查询：{user_query}",
             success_criteria=["提供合理的回答"],
             max_steps=2,
             steps=[
-                {
-                    "id": "s1",
-                    "type": "summarize",
-                    "tool": None,
-                    "inputs": {"query": user_query},
-                    "depends_on": [],
-                    "expect": "理解用户查询并准备回答",
-                    "output_key": "analysis",
-                    "retry": 0
-                }
+                PlanStep(
+                    id="s1",
+                    type=StepType.SUMMARIZE,
+                    inputs={"query": user_query},
+                    depends_on=[],
+                    expect="理解用户查询并准备回答",
+                    output_key="analysis",
+                    retry=0
+                )
             ],
             final_answer_template="基于您的查询，我来帮您解答。"
         )
@@ -240,7 +214,7 @@ def get_planner() -> Planner:
     return _planner_instance
 
 
-async def plan_query(user_query: str, context: Dict[str, Any] = None) -> Plan:
+async def plan_query(user_query: str, context: Dict[str, Any] = None) -> PlannerOutput:
     """
     规划用户查询的便捷函数
 
