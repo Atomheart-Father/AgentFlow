@@ -6,8 +6,10 @@ Gradio用户界面
 import asyncio
 import threading
 import time
+import uuid
+from datetime import datetime
 import gradio as gr
-from typing import List, Tuple, Dict, Any
+from typing import List, Tuple, Dict, Any, Optional
 
 from agent_core import create_agent_core_with_llm
 from config import get_config
@@ -26,11 +28,16 @@ class ChatUI:
         self.config = config
         self.chat_history: List[Tuple[str, str]] = []
         self.metadata_history: List[Dict[str, Any]] = []
-        # 创建带有LLM接口的Agent核心实例
-        # 可以通过环境变量控制是否启用M3模式
-        import os
-        use_m3 = os.getenv("USE_M3_ORCHESTRATOR", "false").lower() == "true"
-        self.agent = create_agent_core_with_llm(use_m3=use_m3)
+
+        # 历史聊天记录管理（预留RAG数据库接口）
+        self.rag_store = None  # 未来接入RAG数据库
+        self.current_conversation_id: Optional[str] = None
+        # 临时内存存储，未来替换为RAG查询
+        self.temp_conversation_cache: Dict[str, Dict[str, Any]] = {}
+
+        # 默认使用传统模式
+        self.use_m3_mode = False
+        self.agent = create_agent_core_with_llm(use_m3=False)
 
         # 心跳机制
         self.heartbeat_thread = None
@@ -76,7 +83,18 @@ class ChatUI:
         """更新最后活动时间"""
         self.last_activity = time.time()
 
-    def process_user_message(self, user_input: str, chat_history) -> Tuple[str, List[Tuple[str, str]], str]:
+    def switch_mode(self, use_m3: bool):
+        """切换AI助手模式"""
+        if self.use_m3_mode != use_m3:
+            logger.info(f"正在切换AI助手模式: {'传统模式' if self.use_m3_mode else 'M3编排器'} -> {'M3编排器' if use_m3 else '传统模式'}")
+            self.use_m3_mode = use_m3
+            # 重新创建Agent实例
+            self.agent = create_agent_core_with_llm(use_m3=use_m3)
+            logger.info(f"AI助手模式已切换为: {'M3编排器' if use_m3 else '传统模式'}")
+            return f"✅ 已切换到 {'M3编排器模式' if use_m3 else '传统模式'}"
+        return f"当前已经是 {'M3编排器模式' if use_m3 else '传统模式'}"
+
+    async def process_user_message(self, user_input: str, chat_history) -> Tuple[str, List[Tuple[str, str]], str]:
         """
         处理用户消息
 
@@ -88,34 +106,46 @@ class ChatUI:
             清空的用户输入、更新后的聊天历史、工具轨迹文本
         """
         if not user_input.strip():
-            return "", chat_history
+            return "", chat_history, "工具轨迹已清除"
 
         # 更新活动时间
         self.update_activity()
 
+        # 清理可能的残留状态
+        if hasattr(self.agent, 'pending_ask_user'):
+            logger.warning("检测到残留的pending_ask_user状态，正在清理")
+            delattr(self.agent, 'pending_ask_user')
+
         logger.info(f"收到用户输入: {user_input[:100]}{'...' if len(user_input) > 100 else ''}")
 
         try:
-            # 调用Agent核心处理
-            result = asyncio.run(self.agent.process(user_input))
+            # 检查是否是用户回答ask_user工具的问题
+            if hasattr(self.agent, 'pending_ask_user'):
+                # 如果有待回答的ask_user问题，先处理用户回答
+                answer = user_input.strip()
+                logger.info(f"处理用户对ask_user工具的回答: {answer}")
 
-            # 提取响应内容
-            assistant_response = result["response"]
-            metadata = result["metadata"]
+                # 处理用户对ask_user的回答
+                original_input = self.agent.pending_ask_user.get('original_input', '')
+                question = self.agent.pending_ask_user.get('question', '问题')
 
-            # 添加到聊天历史
-            chat_history.append((user_input, assistant_response))
+                # 清除pending状态
+                delattr(self.agent, 'pending_ask_user')
 
-            # 记录元数据用于显示
-            self.metadata_history.append(metadata)
+                # 构造包含用户回答的新查询
+                enhanced_query = f"{original_input}\n\n用户回答: {answer}"
 
-            # 记录统计信息
-            self._log_statistics(metadata)
+                # 更新最后一个AI消息，显示用户已回答，然后继续处理
+                if chat_history and chat_history[-1][1].startswith("🤔"):
+                    chat_history[-1] = (f"🤔 {question}", f"✅ 已回答: {answer}\n\n正在继续处理...")
 
-            # 获取工具轨迹
-            tool_trace_text = self.format_tool_trace(metadata.get("tool_call_trace", []))
+                return await self._process_stream(enhanced_query, chat_history, is_followup=True)
 
-            logger.info("用户消息处理完成")
+            else:
+                # 正常处理用户查询
+                # 先显示用户输入，然后使用流式处理
+                chat_history.append((user_input, ""))
+                return await self._process_stream(user_input, chat_history)
 
         except Exception as e:
             error_msg = f"处理消息时发生错误: {str(e)}"
@@ -124,7 +154,122 @@ class ChatUI:
             chat_history.append((user_input, assistant_response))
             tool_trace_text = "❌ 处理过程中发生错误"
 
-        return "", chat_history, tool_trace_text
+        # 支持多轮对话，不清空输入框
+        return None, chat_history, tool_trace_text
+
+    async def _process_stream(self, user_input: str, chat_history, is_followup: bool = False) -> Tuple[str, List[Tuple[str, str]], str]:
+        """
+        流式处理用户输入
+
+        Args:
+            user_input: 用户输入
+            chat_history: 聊天历史（已经包含了用户输入）
+
+        Returns:
+            处理后的输入、聊天历史、工具轨迹
+        """
+        # 流式处理
+        full_response = ""
+        tool_trace_text = ""
+        status_message = ""
+        metadata = {}
+
+        # 用户输入已在process_user_message中添加，这里不需要重复添加
+
+        try:
+            async for chunk in self.agent.process_stream(user_input):
+                if chunk.get("type") == "status":
+                    # 状态更新
+                    status_message = chunk["message"]
+                    # 更新聊天历史中的AI回复，优先显示状态信息
+                    if status_message and not full_response:
+                        # 如果还没有内容，只显示状态
+                        chat_history[-1] = (user_input, f"🔄 {status_message}...")
+                    elif full_response:
+                        # 如果已有内容，在内容后显示状态
+                        chat_history[-1] = (user_input, f"{full_response}\n\n🔄 {status_message}...")
+
+                elif chunk.get("type") == "content":
+                    # 增量内容
+                    full_response += chunk["content"]
+                    # 更新聊天历史，移除状态信息以显示纯内容
+                    chat_history[-1] = (user_input, full_response)
+
+                elif chunk.get("type") == "tool_result":
+                    # 工具执行结果
+                    tool_name = chunk["tool_name"]
+                    result = chunk["result"]
+                    tool_trace_text += f"✅ {tool_name}: {str(result)[:100]}{'...' if len(str(result)) > 100 else ''}\n"
+
+                elif chunk.get("type") == "ask_user":
+                    # ask_user工具调用 - 显示输入界面
+                    question = chunk["question"]
+                    context = chunk["context"]
+                    self.agent.pending_ask_user = {
+                        'tool_call': chunk["tool_call"],
+                        'question': question,
+                        'context': context,
+                        'original_input': user_input
+                    }
+
+                    # 显示需要用户输入的提示，但保持原有格式
+                    message = f"🤔 {question}"
+                    if context:
+                        message += f"\n\n上下文：{context}"
+                    message += "\n\n请在输入框中直接回复，我将继续为您处理请求。"
+
+                    # 替换最后一个条目的AI回复，但保持用户输入不变
+                    if chat_history and len(chat_history[-1]) == 2:
+                        chat_history[-1] = (chat_history[-1][0], message)
+
+                    # 设置等待用户输入状态
+                    break
+
+                elif chunk.get("type") == "final":
+                    # 最终结果
+                    full_response = chunk["response"]
+                    metadata = chunk["metadata"]
+
+                    # 记录统计信息
+                    self._log_statistics(metadata)
+
+                    # 获取最终的工具轨迹
+                    final_tool_trace = self.format_tool_trace(metadata.get("tool_call_trace", []))
+                    if final_tool_trace:
+                        tool_trace_text = final_tool_trace
+
+                    # 最终更新聊天历史
+                    if is_followup:
+                        # followup时更新最后一个消息（应该是"正在处理..."的消息）
+                        # 保持原有的显示格式，只更新AI回复部分
+                        current_user_part = chat_history[-1][0] if chat_history[-1][0] else f"🤔 {self.agent.pending_ask_user.get('question', '问题') if hasattr(self.agent, 'pending_ask_user') else '用户'}"
+                        chat_history[-1] = (current_user_part, full_response)
+                    else:
+                        # 正常情况下更新用户输入对应的AI回复
+                        chat_history[-1] = (user_input, full_response)
+
+                    # 保存对话历史
+                    self.save_current_conversation()
+
+                    break
+
+                elif chunk.get("type") == "error":
+                    # 错误
+                    error_msg = chunk["error"]
+                    chat_history[-1] = (user_input, f"❌ 处理出错: {error_msg}")
+                    tool_trace_text = "❌ 处理过程中发生错误"
+                    break
+
+        except Exception as e:
+            logger.error(f"流式处理异常: {e}")
+            if not is_followup:
+                chat_history[-1] = (user_input, f"❌ 处理出错: {str(e)}")
+            else:
+                chat_history.append(("", f"❌ 处理出错: {str(e)}"))
+            tool_trace_text = "❌ 处理过程中发生错误"
+
+        # 不清空输入框，支持多轮对话
+        return None, chat_history, tool_trace_text
 
     def _log_statistics(self, metadata: Dict[str, Any]):
         """记录统计信息"""
@@ -140,23 +285,202 @@ class ChatUI:
             if "completion_tokens" in usage:
                 logger.info(f"输出Token: {usage['completion_tokens']}")
 
-    def clear_history(self, chat_history) -> Tuple[List[Tuple[str, str]], str, str]:
-        """清除聊天历史"""
-        logger.info("清除聊天历史")
+    def save_current_conversation(self):
+        """保存当前对话到RAG数据库"""
+        if not self.chat_history:
+            return
+
+        try:
+            # 准备对话数据
+            conversation_data = {
+                "id": self.current_conversation_id or str(uuid.uuid4()),
+                "title": self._generate_conversation_title(),
+                "content": self._format_conversation_content(),
+                "metadata": {
+                    "message_count": len(self.chat_history),
+                    "total_tokens": sum(meta.get("usage", {}).get("total_tokens", 0)
+                                      for meta in self.metadata_history if meta),
+                    "mode": "m3" if self.use_m3_mode else "traditional",
+                    "created_at": datetime.now().isoformat(),
+                    "updated_at": datetime.now().isoformat()
+                },
+                "raw_history": self.chat_history.copy(),
+                "raw_metadata": self.metadata_history.copy()
+            }
+
+            # 如果有RAG数据库，调用RAG接口
+            if self.rag_store:
+                success = self.rag_store.save_conversation(conversation_data)
+                if success:
+                    logger.info(f"对话已保存到RAG数据库: {conversation_data['id']}")
+                else:
+                    logger.error("保存对话到RAG数据库失败")
+            else:
+                # 临时存储在内存中
+                self.temp_conversation_cache[conversation_data["id"]] = conversation_data
+                logger.info(f"对话已临时保存到内存缓存: {conversation_data['id']}")
+
+            if not self.current_conversation_id:
+                self.current_conversation_id = conversation_data["id"]
+
+        except Exception as e:
+            logger.error(f"保存对话失败: {e}")
+
+    def _format_conversation_content(self) -> str:
+        """格式化对话内容为适合RAG存储的文本"""
+        content_parts = []
+        for i, (user_msg, ai_msg) in enumerate(self.chat_history):
+            content_parts.append(f"用户: {user_msg}")
+            if ai_msg:
+                content_parts.append(f"助手: {ai_msg}")
+        return "\n\n".join(content_parts)
+
+    def _generate_conversation_title(self) -> str:
+        """根据第一条用户消息生成对话标题"""
+        if self.chat_history:
+            first_user_msg = self.chat_history[0][0]
+            # 截取前20个字符作为标题
+            title = first_user_msg[:20]
+            if len(first_user_msg) > 20:
+                title += "..."
+            return title
+        return "新对话"
+
+    def new_conversation(self, chat_history) -> Tuple[List[Tuple[str, str]], str, str]:
+        """开始新对话"""
+        logger.info("开始新对话")
+
+        # 保存当前对话
+        self.save_current_conversation()
+
+        # 重置当前对话
         self.chat_history = []
         self.metadata_history = []
-        return [], "聊天历史已清除", "工具轨迹已清除"
+        self.current_conversation_id = None
+
+        # 清空pending状态
+        if hasattr(self.agent, 'pending_ask_user'):
+            delattr(self.agent, 'pending_ask_user')
+
+        return None, [], "工具轨迹已清除"
+
+    def load_conversation(self, conversation_id: str) -> Tuple[List[Tuple[str, str]], str]:
+        """从RAG数据库加载指定的对话"""
+        try:
+            if self.rag_store:
+                # 从RAG数据库加载
+                conversation_data = self.rag_store.load_conversation(conversation_id)
+                if conversation_data:
+                    self.current_conversation_id = conversation_id
+                    self.chat_history = conversation_data.get("raw_history", [])
+                    self.metadata_history = conversation_data.get("raw_metadata", [])
+                    title = conversation_data.get("title", "未知对话")
+                    return self.chat_history, f"已加载对话: {title}"
+            else:
+                # 从临时缓存加载
+                if conversation_id in self.temp_conversation_cache:
+                    conv_data = self.temp_conversation_cache[conversation_id]
+                    self.current_conversation_id = conversation_id
+                    self.chat_history = conv_data.get("raw_history", [])
+                    self.metadata_history = conv_data.get("raw_metadata", [])
+                    return self.chat_history, f"已加载对话: {conv_data.get('title', '未知对话')}"
+
+            return [], "未找到指定对话"
+
+        except Exception as e:
+            logger.error(f"加载对话失败: {e}")
+            return [], f"加载对话失败: {e}"
+
+    def delete_conversation(self, conversation_id: str) -> bool:
+        """从RAG数据库删除指定的对话"""
+        try:
+            if self.rag_store:
+                # 从RAG数据库删除
+                return self.rag_store.delete_conversation(conversation_id)
+            else:
+                # 从临时缓存删除
+                if conversation_id in self.temp_conversation_cache:
+                    del self.temp_conversation_cache[conversation_id]
+                    if self.current_conversation_id == conversation_id:
+                        self.current_conversation_id = None
+                        self.chat_history = []
+                        self.metadata_history = []
+                    return True
+            return False
+
+        except Exception as e:
+            logger.error(f"删除对话失败: {e}")
+            return False
+
+    def get_conversation_list(self) -> List[Dict[str, Any]]:
+        """从RAG数据库获取对话列表"""
+        try:
+            if self.rag_store:
+                # 从RAG数据库获取
+                conversations = self.rag_store.list_conversations()
+                return conversations or []
+            else:
+                # 从临时缓存获取
+                return [
+                    {
+                        "id": conv_id,
+                        "title": conv_data.get("title", "未知对话"),
+                        "created_at": conv_data["metadata"].get("created_at", ""),
+                        "updated_at": conv_data["metadata"].get("updated_at", ""),
+                        "message_count": conv_data["metadata"].get("message_count", 0)
+                    }
+                    for conv_id, conv_data in self.temp_conversation_cache.items()
+                ]
+
+        except Exception as e:
+            logger.error(f"获取对话列表失败: {e}")
+            return []
+
+    def search_conversations(self, query: str, limit: int = 10) -> List[Dict[str, Any]]:
+        """搜索相关对话（预留RAG搜索接口）"""
+        try:
+            if self.rag_store:
+                # 使用RAG数据库搜索
+                return self.rag_store.search_conversations(query, limit)
+            else:
+                # 临时实现：简单文本匹配
+                results = []
+                query_lower = query.lower()
+                for conv_id, conv_data in self.temp_conversation_cache.items():
+                    content = conv_data.get("content", "").lower()
+                    if query_lower in content:
+                        results.append({
+                            "id": conv_id,
+                            "title": conv_data.get("title", "未知对话"),
+                            "content_snippet": content[:200] + "..." if len(content) > 200 else content,
+                            "score": 1.0  # 临时分数
+                        })
+                        if len(results) >= limit:
+                            break
+                return results
+
+        except Exception as e:
+            logger.error(f"搜索对话失败: {e}")
+            return []
+
+    def clear_history(self, chat_history) -> Tuple[List[Tuple[str, str]], str, str]:
+        """清除聊天历史（保留在历史记录中）"""
+        logger.info("清除当前聊天历史")
+        self.chat_history = []
+        self.metadata_history = []
+        return [], "当前聊天历史已清除", "工具轨迹已清除"
 
     def get_system_info(self) -> str:
         """获取系统信息"""
         provider_info = f"当前模型提供商: {self.config.model_provider}"
         if hasattr(self.config, 'deepseek_model'):
             provider_info += f" ({self.config.deepseek_model})"
+        mode_info = f"AI助手模式: {'M3编排器' if self.use_m3_mode else '传统模式'}"
         rag_status = f"RAG功能: {'启用' if self.config.rag_enabled else '禁用'}"
         tools_status = f"工具功能: {'启用' if self.config.tools_enabled else '禁用'} ({len(self.agent.tools) if hasattr(self, 'agent') else 0}个工具)"
         log_level = f"日志级别: {self.config.log_level}"
 
-        return f"{provider_info}\n{rag_status}\n{tools_status}\n{log_level}"
+        return f"{provider_info}\n{mode_info}\n{rag_status}\n{tools_status}\n{log_level}"
 
     def format_tool_trace(self, tool_trace: list) -> str:
         """格式化工具调用轨迹"""
@@ -201,61 +525,138 @@ def create_gradio_interface(ui: ChatUI = None) -> gr.Blocks:
         gr.Markdown("# 🤖 AI个人助理")
         gr.Markdown("*基于大语言模型的个人助手，目前支持基础对话功能*")
 
-        # 系统信息显示
-        with gr.Accordion("系统信息", open=False):
-            system_info = gr.Textbox(
-                value=ui.get_system_info(),
-                interactive=False,
-                lines=4,
-                label="当前配置"
-            )
+        # 创建页签
+        with gr.Tabs():
+            # 聊天页签
+            with gr.TabItem("💬 聊天"):
+                # 系统信息显示
+                with gr.Accordion("系统信息", open=False):
+                    system_info = gr.Textbox(
+                        value=ui.get_system_info(),
+                        interactive=False,
+                        lines=4,
+                        label="当前配置"
+                    )
 
-        # 聊天界面
-        chatbot = gr.Chatbot(
-            height=500,
-            show_label=False,
-            container=True
-        )
+                    # 模式切换
+                    with gr.Row():
+                        mode_selector = gr.Radio(
+                            choices=["传统模式", "M3编排器模式"],
+                            value="传统模式",
+                            label="AI助手模式",
+                            interactive=True
+                        )
+                        mode_status = gr.Textbox(
+                            value="当前: 传统模式",
+                            interactive=False,
+                            label="切换状态",
+                            scale=2
+                        )
 
-        # 工具轨迹面板
-        with gr.Accordion("🛠️ 工具调用轨迹", open=False):
-            tool_trace_display = gr.Textbox(
-                value="本次对话未使用任何工具",
-                interactive=False,
-                lines=8,
-                label="工具调用详情",
-                show_label=False
-            )
+                    # 绑定模式切换事件
+                    mode_selector.change(
+                        fn=lambda x: ui.switch_mode(x == "M3编排器模式"),
+                        inputs=[mode_selector],
+                        outputs=[mode_status]
+                    )
 
-        # 输入框
-        with gr.Row():
-            user_input = gr.Textbox(
-                placeholder="请输入您的问题...",
-                show_label=False,
-                container=False,
-                scale=8
-            )
-            submit_btn = gr.Button("发送", scale=1, variant="primary")
-            clear_btn = gr.Button("清除历史", scale=1)
+                # 聊天界面
+                chatbot = gr.Chatbot(
+                    height=500,
+                    show_label=False,
+                    container=True
+                )
 
-        # 绑定事件
-        submit_btn.click(
-            ui.process_user_message,
-            inputs=[user_input, chatbot],
-            outputs=[user_input, chatbot, tool_trace_display]
-        )
+                # 工具轨迹面板
+                with gr.Accordion("🛠️ 工具调用轨迹", open=False):
+                    tool_trace_display = gr.Textbox(
+                        value="本次对话未使用任何工具",
+                        interactive=False,
+                        lines=8,
+                        label="工具调用详情",
+                        show_label=False
+                    )
 
-        user_input.submit(
-            ui.process_user_message,
-            inputs=[user_input, chatbot],
-            outputs=[user_input, chatbot, tool_trace_display]
-        )
+                # 输入框
+                with gr.Row():
+                    user_input = gr.Textbox(
+                        placeholder="请输入您的问题...",
+                        show_label=False,
+                        container=False,
+                        scale=8
+                    )
+                    submit_btn = gr.Button("发送", scale=1, variant="primary")
+                    new_conv_btn = gr.Button("新对话", scale=1)
 
-        clear_btn.click(
-            ui.clear_history,
-            inputs=[chatbot],
-            outputs=[chatbot, user_input, tool_trace_display]
-        )
+                # 绑定事件
+                submit_btn.click(
+                    ui.process_user_message,
+                    inputs=[user_input, chatbot],
+                    outputs=[user_input, chatbot, tool_trace_display],
+                    concurrency_limit=1
+                )
+
+                user_input.submit(
+                    ui.process_user_message,
+                    inputs=[user_input, chatbot],
+                    outputs=[user_input, chatbot, tool_trace_display],
+                    concurrency_limit=1
+                )
+
+                new_conv_btn.click(
+                    ui.new_conversation,
+                    inputs=[chatbot],
+                    outputs=[chatbot, user_input, tool_trace_display]
+                )
+
+            # 历史聊天页签
+            with gr.TabItem("📚 历史记录"):
+                gr.Markdown("### 对话历史记录")
+                gr.Markdown("*基于日期时间存储，支持RAG搜索（待实现）*")
+
+                # 搜索框
+                search_input = gr.Textbox(
+                    placeholder="搜索对话内容...",
+                    label="搜索",
+                    show_label=False
+                )
+
+                # 对话列表
+                conversation_list = gr.Dataframe(
+                    headers=["标题", "消息数", "创建时间", "更新时间"],
+                    datatype=["str", "number", "str", "str"],
+                    interactive=False,
+                    label="对话列表"
+                )
+
+                # 操作按钮
+                with gr.Row():
+                    load_btn = gr.Button("加载选中对话", variant="secondary")
+                    delete_btn = gr.Button("删除选中对话", variant="stop")
+                    refresh_btn = gr.Button("刷新列表", variant="secondary")
+
+                # 绑定事件
+                def update_conversation_list():
+                    """更新对话列表"""
+                    conversations = ui.get_conversation_list()
+                    # 转换为DataFrame格式
+                    df_data = []
+                    for conv in conversations:
+                        df_data.append([
+                            conv.get("title", "未知"),
+                            conv.get("message_count", 0),
+                            conv.get("created_at", "")[:19],  # 只显示到分钟
+                            conv.get("updated_at", "")[:19]
+                        ])
+                    return df_data
+
+                refresh_btn.click(
+                    fn=update_conversation_list,
+                    outputs=[conversation_list]
+                )
+
+                # 页面加载时自动刷新列表
+                conversation_list.value = update_conversation_list()
 
         # 页脚信息
         gr.Markdown("---")
@@ -265,32 +666,29 @@ def create_gradio_interface(ui: ChatUI = None) -> gr.Blocks:
 
 
 def main():
-    """主函数"""
+    """主函数 - 创建Gradio界面并启动服务器"""
     logger.info("启动Gradio UI...")
 
     try:
-        # 创建UI实例（需要在launch前获取）
+        # 创建UI实例
         ui = ChatUI()
         interface = create_gradio_interface(ui)
 
         # 启动心跳机制
         ui.start_heartbeat()
 
-        # 启动服务器 - 启用队列以提高稳定性
-        interface.queue(max_size=20, api_open=False)  # 启用队列，限制并发
+        # 启用队列以提高稳定性
+        interface.queue(max_size=20, api_open=False)
 
+        # 启动服务器
         interface.launch(
             server_name="0.0.0.0",
             server_port=7860,
             share=False,
             show_error=True,
             inbrowser=True,
-            # 性能优化配置
-            max_threads=4,  # 限制最大线程数
-            auth=None,      # 暂时不启用认证
-            # WebSocket keep-alive 设置 - 新版本Gradio已移除enable_queue参数
-            # prevent_thread_lock参数在新版本中也不再需要
-            # 使用queue()方法替代enable_queue参数
+            max_threads=4,
+            auth=None,
         )
 
         logger.info("Gradio UI启动成功，心跳机制已启用")
@@ -310,6 +708,24 @@ def main():
         # 确保心跳机制被停止
         if 'ui' in locals():
             ui.stop_heartbeat()
+
+
+def create_ui():
+    """创建Gradio界面（不启动服务器）"""
+    logger.info("创建Gradio UI界面...")
+
+    # 创建UI实例
+    ui = ChatUI()
+    interface = create_gradio_interface(ui)
+
+    # 启动心跳机制
+    ui.start_heartbeat()
+
+    # 启用队列以提高稳定性
+    interface.queue(max_size=20, api_open=False)
+
+    logger.info("Gradio UI界面创建完成，可调用 interface.launch() 启动服务器")
+    return interface
 
 
 if __name__ == "__main__":

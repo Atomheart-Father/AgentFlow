@@ -15,12 +15,7 @@ from logger import get_logger
 logger = get_logger()
 
 
-class AskUserException(Exception):
-    """用户询问异常 - 表示需要用户输入"""
-
-    def __init__(self, ask_user_data: Dict[str, Any]):
-        self.ask_user_data = ask_user_data
-        super().__init__(f"需要用户回答: {ask_user_data['question']}")
+# AskUserException已移除，现在通过ask_user工具处理
 
 
 class ExecutionState:
@@ -145,8 +140,19 @@ class Executor:
         elif step.type == StepType.SUMMARIZE:
             await self._execute_summarize(step, interpolated_inputs, state)
 
-        elif step.type == StepType.ASK_USER:
-            await self._execute_ask_user(step, interpolated_inputs, state)
+        # ASK_USER步骤已移除，现在通过ask_user工具处理
+
+        elif step.type == StepType.PROCESS:
+            await self._execute_process(step, interpolated_inputs, state)
+
+        elif step.type == StepType.REASONING:
+            await self._execute_reasoning(step, interpolated_inputs, state)
+
+        elif step.type == StepType.RESPONSE_GENERATION:
+            await self._execute_response_generation(step, interpolated_inputs, state)
+
+        elif step.type == StepType.OUTPUT:
+            await self._execute_output(step, interpolated_inputs, state)
 
         else:
             raise ValueError(f"不支持的步骤类型: {step.type}")
@@ -160,13 +166,59 @@ class Executor:
         if not any(tool.name == step.tool for tool in self.tools):
             raise ValueError(f"工具 {step.tool} 不存在")
 
-        logger.info(f"调用工具: {step.tool} 参数: {inputs}")
+        # 参数映射：将常见的参数名映射为工具期望的参数名
+        mapped_inputs = self._map_tool_parameters(step.tool, inputs)
+        logger.info(f"调用工具: {step.tool} 参数: {mapped_inputs}")
 
         # 执行工具
-        result = execute_tool(step.tool, self.tools, **inputs)
+        result = execute_tool(step.tool, self.tools, **mapped_inputs)
 
         # 保存结果
         state.set_artifact(step.output_key, result)
+
+    def _map_tool_parameters(self, tool_name: str, inputs: Dict[str, Any]) -> Dict[str, Any]:
+        """映射工具参数名，将常见的参数名转换为工具期望的参数名"""
+        mapped = inputs.copy()
+
+        # weather_get工具的参数映射
+        if tool_name == "weather_get":
+            # 处理各种可能的参数格式
+            if "city" in mapped and "location" not in mapped:
+                # 将city映射为location
+                mapped["location"] = mapped.pop("city")
+
+            # 处理location参数
+            if "location" in mapped:
+                location_value = mapped["location"]
+                # 处理默认城市描述
+                if isinstance(location_value, str):
+                    if "用户所在城市" in location_value or "默认" in location_value:
+                        mapped["location"] = "北京"
+                    elif "Rotterdam" in location_value:
+                        mapped["location"] = "Rotterdam"
+                    # 如果是其他城市名，直接使用
+
+            # 如果没有location参数，设置默认值
+            if "location" not in mapped:
+                mapped["location"] = "北京"
+
+        # file_read工具的参数映射
+        elif tool_name == "file_read":
+            if "file_path" in mapped and "path" not in mapped:
+                mapped["path"] = mapped.pop("file_path")
+            # file_read工具必须指定文件路径，不设置默认值
+
+        # time_now工具不需要参数
+        elif tool_name == "time_now":
+            # 确保参数为空
+            return {}
+
+        # math_calc工具的参数映射
+        elif tool_name == "math_calc":
+            if "expression" not in mapped and "query" in mapped:
+                mapped["expression"] = mapped.pop("query")
+
+        return mapped
 
     async def _execute_read(self, step: PlanStep, inputs: Dict[str, Any], state: ExecutionState):
         """执行读取操作"""
@@ -197,24 +249,61 @@ class Executor:
         state.set_artifact(step.output_key, result)
         logger.info(f"总结完成: {result[:100]}...")
 
-    async def _execute_ask_user(self, step: PlanStep, inputs: Dict[str, Any], state: ExecutionState):
-        """执行用户询问操作"""
-        question = inputs.get('question', '请提供更多信息')
+    # _execute_ask_user已移除，现在通过ask_user工具处理
 
-        # 保存问题到状态中，等待外部处理
-        ask_user_data = {
-            "question": question,
-            "step_id": step.id,
-            "output_key": step.output_key,
-            "timestamp": datetime.now().isoformat(),
-            "status": "waiting"  # waiting, answered, cancelled
-        }
+    async def _execute_process(self, step: PlanStep, inputs: Dict[str, Any], state: ExecutionState):
+        """执行推理处理步骤"""
+        # 构建处理提示
+        process_prompt = f"请基于以下输入数据进行推理处理：\n\n"
+        process_prompt += f"任务描述: {step.expect}\n\n"
 
-        state.set_artifact(f"ask_user_{step.id}", ask_user_data)
-        logger.info(f"需要用户回答问题: {question}")
+        # 添加输入数据
+        for key, value in inputs.items():
+            if isinstance(value, dict):
+                process_prompt += f"{key}: {json.dumps(value, ensure_ascii=False, indent=2)}\n\n"
+            else:
+                process_prompt += f"{key}: {value}\n\n"
 
-        # 抛出特殊异常，表示需要用户输入
-        raise AskUserException(ask_user_data)
+        process_prompt += "请根据任务描述，对输入数据进行分析和处理，给出结果。"
+
+        messages = [
+            {"role": "system", "content": "你是一个专业的推理助手，请基于提供的输入数据进行分析和处理。"},
+            {"role": "user", "content": process_prompt}
+        ]
+
+        response = await self.llm.generate(
+            messages=messages,
+            max_tokens=1024
+        )
+
+        result = response.content.strip()
+        state.set_artifact(step.output_key, result)
+        logger.info(f"推理处理完成: {result[:100]}...")
+
+    async def _execute_reasoning(self, step: PlanStep, inputs: Dict[str, Any], state: ExecutionState):
+        """执行推理步骤"""
+        # 推理步骤与处理步骤类似，使用LLM进行推理
+        await self._execute_process(step, inputs, state)
+
+    async def _execute_response_generation(self, step: PlanStep, inputs: Dict[str, Any], state: ExecutionState):
+        """执行响应生成步骤"""
+        # 响应生成步骤也是使用LLM生成内容
+        await self._execute_process(step, inputs, state)
+
+    async def _execute_output(self, step: PlanStep, inputs: Dict[str, Any], state: ExecutionState):
+        """执行输出步骤"""
+        # 输出步骤通常是整合信息，不需要LLM调用
+        # 直接将输入数据作为输出
+        output_data = {}
+        for key, value in inputs.items():
+            if isinstance(value, dict):
+                output_data.update(value)
+            else:
+                output_data[key] = value
+
+        state.set_artifact(step.output_key, output_data)
+        logger.info(f"输出步骤完成: {len(output_data)} 个数据项")
+
 
     def _topological_sort(self, steps: List[PlanStep]) -> List[PlanStep]:
         """拓扑排序步骤（处理依赖关系）"""

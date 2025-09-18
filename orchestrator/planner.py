@@ -101,19 +101,46 @@ class Planner:
 4. 严格控制步骤数量（最多6步）
 5. 优先使用工具调用来获取准确信息
 
-可用工具：
+可用工具及参数格式：
 - time_now: 获取当前时间信息
-- weather_get: 查询天气（需要城市名）
+  参数: {} (无需参数)
+
+- weather_get: 查询天气
+  参数格式: {"location": "城市名"} (如北京、上海等)
+
 - calendar_read: 查看日程安排
+  参数格式: {"date": "YYYY-MM-DD"} (可选)
+
 - email_list: 查看邮件
+  参数格式: {"limit": 10} (可选)
+
 - file_read: 读取文件内容
+  参数格式: {"file_path": "文件路径"}
+
+- file_write: 写入文件内容
+  参数格式: {"file_path": "文件路径（如'桌面/报告.md'、'下载/文件.txt'）", "content": "文件内容"}
+
+- ask_user: 询问用户信息
+  参数格式: {"question": "具体问题", "context": "上下文说明（可选）"}
+
 - math_calc: 执行数学计算
+  参数格式: {"expression": "计算表达式"}
 
 规划原则：
-- 工具调用步骤最多2次
+- 工具调用步骤最多5次（支持更复杂的多步骤任务）
 - 每个步骤都要有明确的evidence预期
 - 依赖关系要清晰
 - 最终答案要基于工具结果
+- 使用最简单的参数格式，不要添加多余的描述
+
+信息获取策略：
+- 当需要获取用户信息时，使用ask_user工具询问用户
+- 不要假设用户的默认信息，总是通过ask_user工具获取必要信息
+- ask_user工具会触发前端交互界面，用户可以直接回复
+
+步骤类型选择：
+- tool_call: 调用工具获取信息（包括ask_user工具来询问用户信息）
+- process: 对已有信息进行分析处理
 
 请严格按照以下JSON格式输出计划，不要添加任何额外内容："""
 
@@ -138,6 +165,16 @@ class Planner:
             '      "expect": "具体的证据预期",',
             '      "output_key": "result_key",',
             '      "retry": 1',
+            '    },',
+            '    {',
+            '      "id": "s2",',
+            '      "type": "tool_call",',
+            '      "tool": "ask_user",',
+            '      "inputs": {"question": "请告诉我您的位置"},',
+            '      "depends_on": [],',
+            '      "expect": "用户提供位置信息",',
+            '      "output_key": "user_location",',
+            '      "retry": 0',
             '    }',
             '  ],',
             '  "final_answer_template": "最终答案模板 {{result_key}}"',

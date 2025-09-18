@@ -13,6 +13,10 @@ class StepType(str, Enum):
     READ = "read"
     SUMMARIZE = "summarize"
     ASK_USER = "ask_user"
+    PROCESS = "process"  # LLM推理处理步骤
+    REASONING = "reasoning"  # 推理步骤
+    RESPONSE_GENERATION = "response_generation"  # 响应生成步骤
+    OUTPUT = "output"  # 输出步骤
 
 
 class PlanStep(BaseModel):

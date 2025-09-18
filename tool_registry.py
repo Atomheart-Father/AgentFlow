@@ -138,7 +138,44 @@ def execute_tool(tool_name: str, tools: List[Tool], **kwargs) -> Union[Dict[str,
 
     try:
         logger.info(f"执行工具: {tool_name} 参数: {kwargs}")
-        result = tool.run(**kwargs)
+
+        # 检查是否是异步方法
+        import asyncio
+        import inspect
+
+        # 为不同工具设置不同的超时时间
+        tool_timeout = self._get_tool_timeout(tool_name)
+
+        if inspect.iscoroutinefunction(tool.run):
+            # 异步方法，需要在事件循环中运行
+            try:
+                loop = asyncio.get_event_loop()
+                if loop.is_running():
+                    # 如果事件循环已经在运行，使用线程池执行
+                    import concurrent.futures
+                    with concurrent.futures.ThreadPoolExecutor() as executor:
+                        future = executor.submit(asyncio.run, tool.run(**kwargs))
+                        result = future.result(timeout=tool_timeout)
+                else:
+                    result = loop.run_until_complete(tool.run(**kwargs))
+            except concurrent.futures.TimeoutError:
+                logger.warning(f"工具 {tool_name} 执行超时 ({tool_timeout}s)")
+                result = self._get_tool_timeout_default(tool_name)
+            except Exception as async_e:
+                logger.warning(f"异步执行失败，尝试同步执行: {async_e}")
+                try:
+                    result = tool.run(**kwargs)
+                except Exception as sync_e:
+                    logger.error(f"同步执行也失败: {sync_e}")
+                    result = self._get_tool_timeout_default(tool_name)
+        else:
+            # 同步方法，直接调用
+            try:
+                result = tool.run(**kwargs)
+            except Exception as sync_e:
+                logger.error(f"同步工具执行失败: {sync_e}")
+                result = self._get_tool_timeout_default(tool_name)
+
         logger.info(f"工具 {tool_name} 执行成功")
         return result
 
@@ -150,9 +187,234 @@ def execute_tool(tool_name: str, tools: List[Tool], **kwargs) -> Union[Dict[str,
         retryable = "network" in str(e).lower() or "timeout" in str(e).lower()
         raise ToolError(tool_name, error_msg, retryable=retryable)
 
+    def _get_tool_timeout(self, tool_name: str) -> float:
+        """获取工具的超时时间"""
+        # 为不同工具设置不同的超时时间
+        timeouts = {
+            "weather_get": 15.0,  # 天气查询15秒
+            "time_now": 5.0,      # 时间查询5秒
+            "file_read": 10.0,    # 文件读取10秒
+            "calendar_read": 8.0, # 日程读取8秒
+            "email_list": 12.0,   # 邮件查询12秒
+            "math_calc": 3.0,     # 数学计算3秒
+        }
+        return timeouts.get(tool_name, 10.0)  # 默认10秒
+
+    def _get_tool_timeout_default(self, tool_name: str) -> Any:
+        """获取工具超时的默认返回值"""
+        defaults = {
+            "weather_get": {"error": "天气查询超时，无法获取天气信息"},
+            "time_now": {"error": "时间查询超时，无法获取当前时间"},
+            "file_read": {"error": "文件读取超时，无法获取文件内容"},
+            "calendar_read": {"error": "日程查询超时，无法获取日程信息"},
+            "email_list": {"error": "邮件查询超时，无法获取邮件列表"},
+            "math_calc": {"error": "数学计算超时，无法计算结果"},
+        }
+        return defaults.get(tool_name, {"error": f"工具 {tool_name} 执行超时"})
+
 
 # 全局工具实例缓存
 _cached_tools = None
+
+
+def get_tools(whitelist: List[str] = None, use_cache: bool = True) -> List[Tool]:
+    """
+    获取工具实例（带缓存）
+
+    Args:
+        whitelist: 白名单工具列表
+        use_cache: 是否使用缓存
+
+    Returns:
+        工具实例列表
+    """
+    global _cached_tools
+
+    if not use_cache or _cached_tools is None:
+        _cached_tools = _load_tools(whitelist)
+
+    return _cached_tools
+
+
+def _load_tools(whitelist: List[str] = None) -> List[Tool]:
+    """加载工具实例"""
+    tools = []
+
+    # 动态导入工具模块
+    tool_modules = [
+        "tools.tool_weather",
+        "tools.tool_time",
+        "tools.tool_calculator",
+        "tools.tool_calendar",
+        "tools.tool_email",
+        "tools.tool_file_reader",
+        "tools.tool_file_writer",
+        "tools.tool_math",
+        "tools.tool_websearch",
+        "tools.tool_datetime",
+        "tools.tool_ask_user",
+    ]
+
+    for module_name in tool_modules:
+        try:
+            logger.debug(f"加载工具模块: {module_name}")
+            module = __import__(module_name, fromlist=["ToolWeather", "ToolTime", "ToolCalculator", "ToolCalendar", "ToolEmail", "ToolFileReader", "ToolFileWriter", "ToolMath", "ToolWebSearch", "ToolDateTime", "ToolAskUser"])
+
+            # 获取工具类
+            tool_classes = []
+            for attr_name in dir(module):
+                attr = getattr(module, attr_name)
+                if (isinstance(attr, type) and
+                    hasattr(attr, 'name') and
+                    hasattr(attr, 'run')):
+                    tool_classes.append(attr)
+
+            # 实例化工具
+            for tool_class in tool_classes:
+                try:
+                    if whitelist and tool_class.name not in whitelist:
+                        continue
+
+                    tool_instance = tool_class()
+                    tools.append(tool_instance)
+                    logger.info(f"注册工具: {tool_class.name}")
+                except Exception as e:
+                    logger.warning(f"实例化工具 {tool_class.__name__} 失败: {e}")
+
+        except ImportError as e:
+            logger.warning(f"导入工具模块 {module_name} 失败: {e}")
+        except Exception as e:
+            logger.error(f"加载工具模块 {module_name} 时发生错误: {e}")
+
+    return tools
+
+
+# 创建全局执行器实例
+_executor_instance = None
+
+
+def get_executor() -> "ToolExecutor":
+    """获取全局工具执行器实例"""
+    global _executor_instance
+    if _executor_instance is None:
+        _executor_instance = ToolExecutor()
+    return _executor_instance
+
+
+def execute_tool(tool_name: str, tools: List[Tool], **kwargs) -> Any:
+    """
+    执行工具
+
+    Args:
+        tool_name: 工具名称
+        tools: 工具列表
+        **kwargs: 工具参数
+
+    Returns:
+        工具执行结果
+    """
+    return get_executor().execute_tool(tool_name, tools, **kwargs)
+
+
+class ToolExecutor:
+    """工具执行器"""
+
+    def execute_tool(self, tool_name: str, tools: List[Tool], **kwargs) -> Any:
+        """
+        执行工具
+
+        Args:
+            tool_name: 工具名称
+            tools: 工具列表
+            **kwargs: 工具参数
+
+        Returns:
+            工具执行结果
+        """
+        tool = None
+        for t in tools:
+            if t.name == tool_name:
+                tool = t
+                break
+
+        if tool is None:
+            raise ToolError(tool_name, f"工具不存在", retryable=False)
+
+        try:
+            logger.info(f"执行工具: {tool_name} 参数: {kwargs}")
+
+            # 检查是否是异步方法
+            import asyncio
+            import inspect
+
+            # 为不同工具设置不同的超时时间
+            tool_timeout = self._get_tool_timeout(tool_name)
+
+            if inspect.iscoroutinefunction(tool.run):
+                # 异步方法，需要在事件循环中运行
+                try:
+                    loop = asyncio.get_event_loop()
+                    if loop.is_running():
+                        # 如果事件循环已经在运行，使用线程池执行
+                        import concurrent.futures
+                        with concurrent.futures.ThreadPoolExecutor() as executor:
+                            future = executor.submit(asyncio.run, tool.run(**kwargs))
+                            result = future.result(timeout=tool_timeout)
+                    else:
+                        result = loop.run_until_complete(tool.run(**kwargs))
+                except concurrent.futures.TimeoutError:
+                    logger.warning(f"工具 {tool_name} 执行超时 ({tool_timeout}s)")
+                    result = self._get_tool_timeout_default(tool_name)
+                except Exception as async_e:
+                    logger.warning(f"异步执行失败，尝试同步执行: {async_e}")
+                    try:
+                        result = tool.run(**kwargs)
+                    except Exception as sync_e:
+                        logger.error(f"同步执行也失败: {sync_e}")
+                        result = self._get_tool_timeout_default(tool_name)
+            else:
+                # 同步方法，直接调用
+                try:
+                    result = tool.run(**kwargs)
+                except Exception as sync_e:
+                    logger.error(f"同步工具执行失败: {sync_e}")
+                    result = self._get_tool_timeout_default(tool_name)
+
+            logger.info(f"工具 {tool_name} 执行成功")
+            return result
+
+        except Exception as e:
+            error_msg = f"工具执行失败: {str(e)}"
+            logger.error(f"工具 {tool_name} 执行失败: {error_msg}")
+
+            # 判断是否可重试（网络错误等通常可重试）
+            retryable = "network" in str(e).lower() or "timeout" in str(e).lower()
+            raise ToolError(tool_name, error_msg, retryable=retryable)
+
+    def _get_tool_timeout(self, tool_name: str) -> float:
+        """获取工具的超时时间"""
+        # 为不同工具设置不同的超时时间
+        timeouts = {
+            "weather_get": 15.0,  # 天气查询15秒
+            "time_now": 5.0,      # 时间查询5秒
+            "file_read": 10.0,    # 文件读取10秒
+            "calendar_read": 8.0, # 日程读取8秒
+            "email_list": 12.0,   # 邮件查询12秒
+            "math_calc": 3.0,     # 数学计算3秒
+        }
+        return timeouts.get(tool_name, 10.0)  # 默认10秒
+
+    def _get_tool_timeout_default(self, tool_name: str) -> Any:
+        """获取工具超时的默认返回值"""
+        defaults = {
+            "weather_get": {"error": "天气查询超时，无法获取天气信息"},
+            "time_now": {"error": "时间查询超时，无法获取当前时间"},
+            "file_read": {"error": "文件读取超时，无法获取文件内容"},
+            "calendar_read": {"error": "日程查询超时，无法获取日程信息"},
+            "email_list": {"error": "邮件查询超时，无法获取邮件列表"},
+            "math_calc": {"error": "数学计算超时，无法计算结果"},
+        }
+        return defaults.get(tool_name, {"error": f"工具 {tool_name} 执行超时"})
 
 
 def get_tools(whitelist: List[str] = None, use_cache: bool = True) -> List[Tool]:

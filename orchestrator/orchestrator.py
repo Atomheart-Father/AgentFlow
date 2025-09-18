@@ -10,7 +10,7 @@ from datetime import datetime
 
 from schemas.plan import Plan, PlanStep, StepType
 from .planner import get_planner
-from .executor import get_executor, ExecutionState, AskUserException
+from .executor import get_executor, ExecutionState
 from .judge import get_judge, JudgeResult
 from .post_mortem_logger import get_post_mortem_logger
 from logger import get_logger
@@ -22,7 +22,6 @@ class OrchestratorState(Enum):
     """编排器状态"""
     PLAN = "plan"
     ACT = "act"
-    ASK_USER = "ask_user"
     JUDGE = "judge"
     DONE = "done"
     FAILED = "failed"
@@ -62,7 +61,7 @@ class OrchestratorResult:
 class Orchestrator:
     """编排器主类"""
 
-    def __init__(self, max_iterations: int = 2, max_execution_time: float = 60.0):
+    def __init__(self, max_iterations: int = 3, max_execution_time: float = 300.0):
         """
         初始化编排器
 
@@ -126,20 +125,11 @@ class Orchestrator:
                     self.post_mortem_logger.log_phase_start("ACT", iteration)
                     current_state, execution_state = await self._act_phase(result.final_plan, iteration, result)
                     status = "completed"
-                    if current_state == OrchestratorState.ASK_USER:
-                        status = "waiting_user_input"
-                    elif current_state == OrchestratorState.FAILED:
+                    if current_state == OrchestratorState.FAILED:
                         status = "failed"
                     self.post_mortem_logger.log_phase_end("ACT", status)
 
-                elif current_state == OrchestratorState.ASK_USER:
-                    # 用户询问状态，等待用户输入后再继续
-                    logger.info("编排器进入用户询问等待状态")
-                    # 记录用户交互等待状态
-                    ask_user_data = result.execution_state.get_artifact("ask_user_pending") if result.execution_state else None
-                    if ask_user_data:
-                        self.post_mortem_logger.log_user_interaction("waiting_for_user", ask_user_data["question"])
-                    current_state = OrchestratorState.ASK_USER  # 保持在ASK_USER状态，等待外部输入
+                # ASK_USER状态已移除，现在通过ask_user工具处理
 
                 elif current_state == OrchestratorState.JUDGE:
                     self.post_mortem_logger.log_phase_start("JUDGE", iteration)
@@ -306,12 +296,7 @@ class Orchestrator:
 
             return OrchestratorState.JUDGE, execution_state
 
-        except AskUserException as e:
-            # 直接处理用户询问异常
-            logger.info(f"执行阶段遇到用户询问: {e.ask_user_data['question']}")
-            result.execution_state = ExecutionState()
-            result.execution_state.set_artifact("ask_user_pending", e.ask_user_data)
-            return OrchestratorState.ASK_USER, result.execution_state
+            # AskUserException不再使用，现在通过ask_user工具处理
 
         except Exception as e:
             logger.error(f"执行阶段失败: {e}")

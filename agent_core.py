@@ -4,7 +4,7 @@ Agent核心模块
 """
 import asyncio
 import json
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, AsyncGenerator
 from datetime import datetime
 
 from llm_interface import get_llm_interface, LLMResponse
@@ -243,6 +243,267 @@ class AgentCore:
                 }
             }
 
+    async def process_stream(self, user_input: str, context: Optional[Dict[str, Any]] = None) -> AsyncGenerator[Dict[str, Any], None]:
+        """
+        流式处理用户输入
+
+        Args:
+            user_input: 用户输入
+            context: 上下文信息
+
+        Yields:
+            Dict[str, Any]: 流式数据块
+        """
+        if self.llm.provider is None:
+            raise RuntimeError("LLM提供者未初始化。请先调用 set_llm_interface() 设置有效的LLM接口，或调用 llm.initialize_provider()")
+
+        start_time = datetime.now()
+        logger.info(f"开始流式处理用户输入: {user_input[:100]}{'...' if len(user_input) > 100 else ''}")
+
+        try:
+            # 检查是否使用M3模式
+            if self.use_m3 and hasattr(self, 'orchestrator'):
+                logger.info("使用M3编排器模式处理查询")
+                async for chunk in self._process_with_m3_stream(user_query=user_input, context=context):
+                    yield chunk
+                return
+
+            # 初始化对话历史
+            messages = []
+            tool_call_trace = []
+            max_tool_calls = 2  # 最多2次工具调用
+
+            # 系统提示词
+            system_prompt = self._build_system_prompt()
+            messages.append({"role": "system", "content": system_prompt})
+
+            # 用户输入（只添加一次）
+            messages.append({"role": "user", "content": user_input})
+
+            # 工具调用回路
+            for tool_call_count in range(max_tool_calls + 1):
+                logger.info(f"开始第 {tool_call_count + 1} 轮对话")
+
+                # 准备工具模式
+                tools_schema = None
+                if self.tools and tool_call_count < max_tool_calls:
+                    tools_schema = to_openai_tools(self.tools)
+                    logger.debug(f"启用工具模式，共 {len(self.tools)} 个工具")
+
+                # yield工具调用状态
+                if tools_schema:
+                    yield {
+                        "type": "status",
+                        "status": "thinking",
+                        "message": f"🤔 正在思考和分析您的请求..."
+                    }
+
+                # 调用LLM（流式模式）
+                try:
+                    full_content = ""
+                    function_calls = []
+
+                    async for chunk in self.llm.generate_stream(
+                        messages=messages,
+                        tools_schema=tools_schema
+                    ):
+                        if chunk.get("type") == "content":
+                            # 增量内容
+                            yield {
+                                "type": "content",
+                                "content": chunk["content"],
+                                "full_content": chunk["full_content"]
+                            }
+                            full_content = chunk["full_content"]
+
+                        elif chunk.get("type") == "final":
+                            # 最终结果
+                            response = chunk["response"]
+                            full_content = response.content
+                            function_calls = response.function_calls or []
+                            break
+
+                        elif chunk.get("type") == "error":
+                            # 错误
+                            yield {
+                                "type": "error",
+                                "error": chunk["error"]
+                            }
+                            return
+
+                    # 检查是否有工具调用
+                    if function_calls:
+                        logger.info(f"检测到 {len(function_calls)} 个工具调用")
+
+                        # yield工具调用状态
+                        yield {
+                            "type": "status",
+                            "status": "tool_call",
+                            "message": f"🔧 正在调用工具..."
+                        }
+
+                        # 处理工具调用
+                        tool_results = []
+                        for tool_call in function_calls:
+                            try:
+                                # 处理新的OpenAI格式
+                                if tool_call.get("type") == "function" and "function" in tool_call:
+                                    func_info = tool_call["function"]
+                                    tool_name = func_info.get("name")
+                                    tool_args = func_info.get("arguments", {})
+                                    if isinstance(tool_args, str):
+                                        try:
+                                            tool_args = json.loads(tool_args)
+                                        except json.JSONDecodeError:
+                                            tool_args = {}
+                                    tool_call_id = tool_call.get("id")
+                                else:
+                                    # 兼容旧格式
+                                    tool_name = tool_call.get("name")
+                                    tool_args = tool_call.get("arguments", {})
+                                    tool_call_id = tool_call.get("id")
+
+                                # 更新tool_call格式用于后续处理
+                                normalized_tool_call = {
+                                    "id": tool_call_id,
+                                    "name": tool_name,
+                                    "arguments": tool_args
+                                }
+
+                                logger.info(f"执行工具: {tool_name}, 参数: {tool_args}")
+
+                                # yield具体工具调用状态
+                                yield {
+                                    "type": "status",
+                                    "status": "tool_executing",
+                                    "message": f"🔧 正在执行 {tool_name}..."
+                                }
+
+                                # 特殊处理ask_user工具
+                                if tool_name == "ask_user":
+                                    # ask_user工具需要用户交互，返回特殊状态
+                                    result = await self._execute_tool_call(normalized_tool_call)
+
+                                    # yield ask_user状态，让前端显示输入界面
+                                    yield {
+                                        "type": "ask_user",
+                                        "question": tool_args.get("question", "请提供更多信息"),
+                                        "context": tool_args.get("context", ""),
+                                        "tool_call": normalized_tool_call
+                                    }
+                                    # 不再继续处理，返回等待用户输入
+                                    return
+
+                                # 执行普通工具
+                                result = await self._execute_tool_call(normalized_tool_call)
+
+                                tool_results.append({
+                                    "tool_call": normalized_tool_call,
+                                    "result": result
+                                })
+
+                                tool_call_trace.append({
+                                    "tool_name": tool_name,
+                                    "args": tool_args,
+                                    "result": result,
+                                    "success": True
+                                })
+
+                                # yield工具执行结果
+                                yield {
+                                    "type": "tool_result",
+                                    "tool_name": tool_name,
+                                    "result": result
+                                }
+
+                            except Exception as e:
+                                error_msg = f"工具 {tool_name} 执行失败: {str(e)}"
+                                logger.error(error_msg)
+
+                                tool_results.append({
+                                    "tool_call": normalized_tool_call,
+                                    "error": str(e)
+                                })
+
+                                tool_call_trace.append({
+                                    "tool_name": tool_name,
+                                    "args": tool_args,
+                                    "error": str(e),
+                                    "success": False
+                                })
+
+                        # 添加助手消息（包含tool_calls）
+                        messages.append({
+                            "role": "assistant",
+                            "content": full_content,
+                            "tool_calls": function_calls  # function_calls已经是正确的OpenAI格式
+                        })
+
+                        # 添加工具结果到消息历史（必须在assistant消息之后）
+                        for tool_result in tool_results:
+                            if "result" in tool_result:
+                                messages.append({
+                                    "role": "tool",
+                                    "content": str(tool_result["result"]),
+                                    "tool_call_id": tool_result["tool_call"].get("id")
+                                })
+                            else:
+                                messages.append({
+                                    "role": "tool",
+                                    "content": f"工具执行失败: {tool_result['error']}",
+                                    "tool_call_id": tool_result["tool_call"].get("id")
+                                })
+
+                        # yield继续思考状态
+                        yield {
+                            "type": "status",
+                            "status": "thinking",
+                            "message": f"💭 基于工具结果继续思考..."
+                        }
+
+                        continue  # 继续下一轮对话
+
+                    else:
+                        # 没有工具调用，结束对话
+                        break
+
+                except Exception as e:
+                    logger.error(f"LLM调用异常: {e}")
+                    # 如果是网络错误，重试
+                    if "timeout" in str(e).lower() or "connection" in str(e).lower():
+                        logger.info("检测到网络错误，等待后重试...")
+                        import asyncio
+                        await asyncio.sleep(2)
+                        continue
+                    else:
+                        yield {
+                            "type": "error",
+                            "error": f"LLM调用异常: {str(e)}"
+                        }
+                        return
+
+            # 计算响应时间
+            response_time = (datetime.now() - start_time).total_seconds()
+
+            # yield最终结果
+            yield {
+                "type": "final",
+                "response": full_content,
+                "metadata": {
+                    "mode": "traditional",
+                    "tool_call_trace": tool_call_trace,
+                    "response_time": response_time,
+                    "total_rounds": tool_call_count + 1
+                }
+            }
+
+        except Exception as e:
+            logger.error(f"流式处理失败: {e}")
+            yield {
+                "type": "error",
+                "error": f"处理请求时发生错误: {str(e)}"
+            }
+
     async def _process_with_m3(self, user_query: str, context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """
         使用M3编排器处理用户查询
@@ -259,6 +520,24 @@ class AgentCore:
         try:
             # 使用编排器处理查询
             orchestrator_result = await self.orchestrator.orchestrate(user_query, context)
+
+            # 检查是否处于ask_user状态
+            if orchestrator_result.status == "ask_user" and orchestrator_result.execution_state:
+                ask_user_data = orchestrator_result.execution_state.get_artifact("ask_user_pending")
+                if ask_user_data:
+                    response = f"🤔 {ask_user_data['question']}\n\n请告诉我您的答案，我将继续为您处理请求。"
+                    metadata = {
+                        "mode": "m3_orchestrator",
+                        "status": "ask_user",
+                        "ask_user_pending": ask_user_data,
+                        "final_plan": orchestrator_result.final_plan,
+                        "execution_state": orchestrator_result.execution_state,
+                        "timestamp": start_time.isoformat()
+                    }
+                    return {
+                        "response": response,
+                        "metadata": metadata
+                    }
 
             # 转换结果格式以保持与传统模式的兼容性
             response = orchestrator_result.final_answer or "处理完成，但无法生成最终答案。"
@@ -342,6 +621,8 @@ TOOL USAGE RULES:
 - For email queries: Call email_list
 - For web searches: Call web_search
 - For file reading: Call file_read
+- For file writing: Call file_write (supports path aliases like "桌面", "下载", "文档")
+- For asking user information (location, date, etc.): Call ask_user
 
 IMPORTANT: Always call the appropriate tool when external information is needed. Do not provide generic responses."""
 
