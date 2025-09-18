@@ -62,8 +62,10 @@ async def on_message(message: cl.Message):
     user_msg = cl.Message(content=message.content, author="用户")
     await user_msg.send()
 
-    # 记录用户消息到对话历史
+    # 获取session并记录用户消息到对话历史
+    session = get_session(session_id)
     session.add_message("user", message.content)
+
     if session.has_pending_ask():
         # 这是对之前问题的回答，直接续跑任务
         await handle_resume_with_answer(message.content, session_id)
