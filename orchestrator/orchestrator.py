@@ -383,6 +383,22 @@ class Orchestrator:
             result.plan_iterations = active_task.plan_iterations
             result.total_tool_calls = active_task.total_tool_calls
 
+            # 检查是否已经有完整的execution_state可以直接继续执行
+            if result.execution_state and result.final_plan:
+                # 检查是否所有必要的用户输入都已提供
+                has_pending_ask = result.execution_state.get_artifact("ask_user_pending")
+                if not has_pending_ask:
+                    # 没有待处理的ask_user，可以直接从ACT阶段开始
+                    current_state = OrchestratorState.ACT
+                    logger.info("检测到完整的execution_state，直接从ACT阶段开始")
+                else:
+                    current_state = OrchestratorState.ASK_USER
+                    logger.info("检测到待处理的ask_user问题")
+            else:
+                current_state = OrchestratorState.PLAN
+        else:
+            current_state = OrchestratorState.PLAN
+
         # 开始备现身复盘会话
         session_id = f"session_{int(time.time())}_{hash(user_query) % 10000}"
         self.post_mortem_logger.start_session(session_id, user_query, "m3")

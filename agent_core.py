@@ -554,11 +554,13 @@ class AgentCore:
                         # 将用户答案添加到execution_state中
                         if session.active_task.execution_state:
                             # 查找等待用户输入的步骤，并设置答案
-                            for step_id, artifact in session.active_task.execution_state.artifacts.items():
-                                if isinstance(artifact, dict) and artifact.get("type") == "ask_user_pending":
-                                    output_key = artifact.get("output_key", "user_answer")
-                                    session.active_task.execution_state.set_artifact(output_key, user_answer)
-                                    break
+                            ask_user_pending = session.active_task.execution_state.get_artifact("ask_user_pending")
+                            if ask_user_pending and isinstance(ask_user_pending, dict):
+                                output_key = ask_user_pending.get("output_key", "user_location")
+                                session.active_task.execution_state.set_artifact(output_key, user_answer)
+                                # 清除ask_user_pending状态，防止重复询问
+                                session.active_task.execution_state.set_artifact("ask_user_pending", None)
+                                print(f"[DEBUG] 设置用户答案到 {output_key}: {user_answer}，清除ask_user_pending状态")
 
                         # 使用现有的active_task继续编排
                         result = await self.orchestrator.orchestrate(user_query="", context=context, active_task=session.active_task)
