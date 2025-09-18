@@ -6,7 +6,7 @@ import asyncio
 import gradio as gr
 from typing import List, Tuple, Dict, Any
 
-from agent_core import process_message
+from agent_core import create_agent_core_with_llm
 from config import get_config
 from logger import setup_logging, get_logger
 
@@ -23,6 +23,8 @@ class ChatUI:
         self.config = config
         self.chat_history: List[Tuple[str, str]] = []
         self.metadata_history: List[Dict[str, Any]] = []
+        # 创建带有LLM接口的Agent核心实例
+        self.agent = create_agent_core_with_llm()
 
     def process_user_message(self, user_input: str, chat_history) -> Tuple[str, List[Tuple[str, str]]]:
         """
@@ -42,7 +44,7 @@ class ChatUI:
 
         try:
             # 调用Agent核心处理
-            result = asyncio.run(process_message(user_input))
+            result = asyncio.run(self.agent.process(user_input))
 
             # 提取响应内容
             assistant_response = result["response"]
@@ -70,10 +72,16 @@ class ChatUI:
     def _log_statistics(self, metadata: Dict[str, Any]):
         """记录统计信息"""
         if "response_time" in metadata:
-            logger.info(".2f"        if "usage" in metadata and metadata["usage"]:
+            logger.info(f"响应时间: {metadata['response_time']:.2f}s")
+
+        if "usage" in metadata and metadata["usage"]:
             usage = metadata["usage"]
             if "total_tokens" in usage:
                 logger.info(f"Token使用: {usage['total_tokens']}")
+            if "prompt_tokens" in usage:
+                logger.info(f"输入Token: {usage['prompt_tokens']}")
+            if "completion_tokens" in usage:
+                logger.info(f"输出Token: {usage['completion_tokens']}")
 
     def clear_history(self, chat_history) -> Tuple[List[Tuple[str, str]], str]:
         """清除聊天历史"""
