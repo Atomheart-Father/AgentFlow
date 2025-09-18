@@ -24,25 +24,31 @@ class QueryRouter:
             r'\b(?:明天|后天|今天|昨天|前天|下周|上周|明年|去年|日期|时间|几号|星期|周几)\b',
             r'\b(?:tomorrow|yesterday|next week|last week|date|time|schedule)\b',
 
-            # 天气相关
-            r'\b(?:天气|气温|降雨|下雨|晴天|阴天|多云|雨天|雪|风)\b',
-            r'\b(?:weather|temperature|rain|sunny|cloudy|wind)\b',
+            # 天气相关 - 增强检测
+            r'\b(?:天气|气温|降雨|下雨|晴天|阴天|多云|雨天|雪|风|湿度|气压)\b',
+            r'\b(?:weather|temperature|rain|sunny|cloudy|wind|humidity|pressure)\b',
+            r'\b(?:查.*天气|看.*天气|问.*天气|了解.*天气)\b',
 
-            # 规划和任务相关
-            r'\b(?:计划|规划|安排|步骤|执行|完成|总结|分析)\b',
-            r'\b(?:plan|schedule|arrange|steps|execute|complete|summary|analyze)\b',
+            # 规划和任务相关 - 增强检测
+            r'\b(?:计划|规划|安排|步骤|执行|完成|总结|分析|制定|准备)\b',
+            r'\b(?:plan|schedule|arrange|steps|execute|complete|summary|analyze|formulate|prepare)\b',
+            r'\b(?:怎么.*规划|如何.*规划|制定.*计划)\b',
 
             # 文件操作相关
-            r'\b(?:生成文件|保存|写入|创建|写到桌面|md|txt|json|文档)\b',
-            r'\b(?:generate file|save|write|create|markdown|text|json)\b',
+            r'\b(?:生成文件|保存|写入|创建|写到桌面|md|txt|json|文档|报告)\b',
+            r'\b(?:generate file|save|write|create|markdown|text|json|document|report)\b',
 
             # 工具调用相关
-            r'\b(?:搜索|查找|计算|换算|邮件|日历|工具|RAG|引用)\b',
-            r'\b(?:search|find|calculate|convert|email|calendar|tool)\b',
+            r'\b(?:搜索|查找|计算|换算|邮件|日历|工具|RAG|引用|浏览)\b',
+            r'\b(?:search|find|calculate|convert|email|calendar|tool|browse)\b',
 
-            # 复杂指令
-            r'\b(?:帮我|请|需要|要求|必须|应该)\b.*\b(?:查|找|做|写|算|分析)\b',
-            r'\b(?:help me|please|need|require|must|should)\b.*\b(?:check|find|do|write|calculate|analyze)\b',
+            # 复杂指令 - 增强动词组合
+            r'\b(?:帮我|请|需要|要求|必须|应该|能否|可以)\b.*\b(?:查|找|做|写|算|分析|生成|创建|规划)\b',
+            r'\b(?:help me|please|need|require|must|should|could|can)\b.*\b(?:check|find|do|write|calculate|analyze|generate|create|plan)\b',
+
+            # 报告和文档生成
+            r'\b(?:写.*报告|生成.*文档|创建.*文件|制作.*总结)\b',
+            r'\b(?:write.*report|generate.*document|create.*file|make.*summary)\b',
         ]
 
         # 简单问答的否定模式（如果匹配这些，仍然走复杂流程）
@@ -104,10 +110,12 @@ class QueryRouter:
         # 检查是否匹配复杂任务模式
         for pattern in self.complex_patterns:
             if re.search(pattern, query_lower):
+                # 如果匹配关键词，即使查询较短也认为是复杂任务
+                confidence = 0.9 if query_length < 50 else 0.8
                 return QueryType.COMPLEX_PLAN, {
                     "reason": "keyword_match",
                     "pattern": pattern,
-                    "confidence": 0.8
+                    "confidence": confidence
                 }
 
         # 基于长度和指令性的简单判断
