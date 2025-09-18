@@ -268,12 +268,18 @@ IMPORTANT: Always call the appropriate tool when external information is needed.
                 arguments = tool_call.function.arguments
                 tool_call_id = tool_call.id
                 logger.debug(f"Extracted from OpenAI object: name={tool_name}, id={tool_call_id}")
+            elif isinstance(tool_call, dict):
+                # 字典格式（从llm_interface转换而来）
+                tool_name = tool_call.get("name", "")
+                arguments = tool_call.get("arguments", {})
+                tool_call_id = tool_call.get("id", "")
+                logger.debug(f"Extracted from dict: name={tool_name}, id={tool_call_id}, dict_keys={list(tool_call.keys())}")
             else:
                 # 字典格式（向后兼容）
                 tool_name = tool_call.get("function", {}).get("name", "")
                 arguments = tool_call.get("function", {}).get("arguments", "{}")
                 tool_call_id = tool_call.get("id", "")
-                logger.debug(f"Extracted from dict: name={tool_name}, id={tool_call_id}")
+                logger.debug(f"Extracted from legacy dict: name={tool_name}, id={tool_call_id}")
 
             # 解析参数（如果是字符串）
             if isinstance(arguments, str):
