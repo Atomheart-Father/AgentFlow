@@ -575,10 +575,16 @@ class Orchestrator:
                                     true_ask_id = ask_user_pending.get("ask_id", f"ask_{int(time.time())}")
                                     step_id = ask_user_pending.get("step_id", "")
                                     output_key = ask_user_pending.get("output_key", "")
+                                    expects = ask_user_pending.get("expects", "answer")  # 从ask_user_pending提取expects
 
-                                    logger.info(f"[DEBUG] 从ask_user_pending提取: ask_id={true_ask_id}, step_id={step_id}, output_key={output_key}")
+                                    logger.info(f"[DEBUG] 从ask_user_pending提取: ask_id={true_ask_id}, step_id={step_id}, output_key={output_key}, expects={expects}")
 
-                                    session.set_pending_ask(questions[0], true_ask_id)
+                                    # 创建PendingAsk对象并设置expects字段
+                                    session.pending_ask = PendingAsk(
+                                        ask_id=true_ask_id,
+                                        question=questions[0],
+                                        expects=expects
+                                    )
 
                                     logger.info(f"[DEBUG] session.pending_ask设置完成: ask_id={session.pending_ask.ask_id if session.pending_ask else 'NONE'}, expects={session.pending_ask.expects if session.pending_ask else 'NONE'}")
                                     logger.info(f"设置session pending_ask: {questions[0]} (true_ask_id: {true_ask_id}, step_id: {step_id})")

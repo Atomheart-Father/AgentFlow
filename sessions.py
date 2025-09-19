@@ -48,13 +48,15 @@ def set_pending_ask(session_id: str, question: str, expects: str = "answer") -> 
         return False
 
 
-def resume_with_answer(session_id: str, answer: str) -> Optional[SessionState]:
+def resume_with_answer(session_id: str, answer: str, ask_id: str = None, output_key: str = None) -> Optional[SessionState]:
     """
-    使用用户答案恢复任务执行
+    使用用户答案恢复任务执行 - 支持宽松字段兼容
 
     Args:
         session_id: 会话ID
-        answer: 用户答案
+        answer: 用户答案（兼容value等别名）
+        ask_id: 询问ID（可选，用于验证）
+        output_key: 输出键名（可选，优先使用）
 
     Returns:
         SessionState: 更新后的会话状态，如果失败返回None
@@ -66,21 +68,38 @@ def resume_with_answer(session_id: str, answer: str) -> Optional[SessionState]:
             logger.warning(f"会话 {session_id} 没有挂起的问题")
             return None
 
+        # 验证ask_id一致性（如果提供）
+        if ask_id and session.pending_ask.ask_id != ask_id:
+            logger.error(f"AskID不匹配: 期望 {session.pending_ask.ask_id}, 收到 {ask_id}")
+            return None
+
         # 清除pending状态
         pending_ask = session.pending_ask
         session.clear_pending_ask()
 
         # 将答案填入execution state
         if session.active_task and session.active_task.execution_state:
-            # 根据期望的答案类型设置参数
-            if "city" in pending_ask.expects.lower():
-                session.active_task.execution_state.set_artifact("user_city", answer)
-            elif "date" in pending_ask.expects.lower():
-                session.active_task.execution_state.set_artifact("user_date", answer)
+            # 确定输出键名
+            if output_key:
+                # 优先使用传入的output_key
+                final_output_key = output_key
             else:
-                session.active_task.execution_state.set_artifact("user_answer", answer)
+                # 根据expects类型推断output_key
+                expects = pending_ask.expects.lower()
+                if "city" in expects:
+                    final_output_key = "user_city"
+                elif "date" in expects:
+                    final_output_key = "user_date"
+                else:
+                    final_output_key = "user_answer"
 
-            logger.info(f"用户答案已写入execution_state: {answer}")
+            # 写入答案到execution state
+            session.active_task.execution_state.set_artifact(final_output_key, answer)
+
+            # 清除ask_user_pending状态
+            session.active_task.execution_state.remove_artifact("ask_user_pending")
+
+            logger.info(f"用户答案已写入execution_state: {final_output_key} = {answer}")
             return session
         else:
             logger.warning(f"会话 {session_id} 没有活跃任务")
