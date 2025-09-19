@@ -296,7 +296,6 @@ def _load_tools(whitelist: List[str] = None) -> List[Tool]:
     tool_modules = [
         "tools.tool_weather",
         "tools.tool_time",
-        "tools.tool_calculator",
         "tools.tool_calendar",
         "tools.tool_email",
         "tools.tool_file_reader",
@@ -311,7 +310,7 @@ def _load_tools(whitelist: List[str] = None) -> List[Tool]:
     for module_name in tool_modules:
         try:
             logger.debug(f"加载工具模块: {module_name}")
-            module = __import__(module_name, fromlist=["ToolWeather", "ToolTime", "ToolCalculator", "ToolCalendar", "ToolEmail", "ToolFileReader", "ToolFileWriter", "ToolFSWrite", "ToolMath", "ToolWebSearch", "ToolDateNormalizer", "ToolAskUser"])
+            module = __import__(module_name, fromlist=["ToolWeather", "ToolTime", "ToolCalendar", "ToolEmail", "ToolFileReader", "ToolFileWriter", "ToolFSWrite", "ToolMath", "ToolWebSearch", "ToolDateNormalizer", "ToolAskUser"])
 
             # 获取工具类
             tool_classes = []
