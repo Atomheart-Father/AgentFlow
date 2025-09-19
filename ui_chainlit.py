@@ -113,6 +113,7 @@ async def handle_resume_with_answer(user_answer: str, session_id: str):
     """处理用户对pending_ask的回答 - 会话续跑"""
     global agent_core
     from orchestrator import get_session
+    from session_manager import session_manager
     session = get_session(session_id)
 
     if not session.has_pending_ask():
