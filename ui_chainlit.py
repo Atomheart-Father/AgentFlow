@@ -174,7 +174,7 @@ async def handle_resume_with_answer(user_answer: str, session_id: str):
                 return
 
         # 将用户答案设置到active_task的execution_state中
-        if session.active_task.execution_state:
+        if session.active_task and session.active_task.execution_state:
             # 查找ask_user_pending并设置答案
             ask_user_pending = session.active_task.execution_state.get_artifact("ask_user_pending")
             if ask_user_pending and isinstance(ask_user_pending, dict):
@@ -191,8 +191,22 @@ async def handle_resume_with_answer(user_answer: str, session_id: str):
                     print(f"[DEBUG]   {k}: {v}")
             else:
                 print(f"[DEBUG] ask_user_pending not found or not dict: {ask_user_pending}")
+
+                # 如果没有ask_user_pending，尝试从pending_ask中推断output_key
+                if session.pending_ask and hasattr(session.pending_ask, 'expects'):
+                    # 根据问题类型推断output_key
+                    question = session.pending_ask.question.lower()
+                    if "城市" in question or "city" in question:
+                        output_key = "user_location"
+                    elif "日期" in question or "时间" in question or "date" in question or "time" in question:
+                        output_key = "user_date"
+                    else:
+                        output_key = "user_answer"
+
+                    session.active_task.execution_state.set_artifact(output_key, user_answer)
+                    print(f"[DEBUG] 从问题推断output_key: {output_key} = {user_answer}")
         else:
-            print(f"[DEBUG] session.active_task.execution_state is None")
+            print(f"[DEBUG] session.active_task或execution_state is None")
 
         # 使用agent_core继续处理，传递包含active_task的上下文
         context = {

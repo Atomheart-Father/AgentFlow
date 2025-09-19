@@ -561,6 +561,24 @@ class AgentCore:
                                 # 清除ask_user_pending状态，防止重复询问
                                 session.active_task.execution_state.set_artifact("ask_user_pending", None)
                                 print(f"[DEBUG] 设置用户答案到 {output_key}: {user_answer}，清除ask_user_pending状态")
+                            else:
+                                # 如果ask_user_pending不存在，尝试从pending_ask中推断
+                                if session.pending_ask and hasattr(session.pending_ask, 'expects'):
+                                    # 根据问题类型推断output_key
+                                    question = session.pending_ask.question.lower()
+                                    if "城市" in question or "city" in question:
+                                        output_key = "user_location"
+                                    elif "日期" in question or "时间" in question or "date" in question or "time" in question:
+                                        output_key = "user_date"
+                                    else:
+                                        output_key = "user_answer"
+
+                                    session.active_task.execution_state.set_artifact(output_key, user_answer)
+                                    print(f"[DEBUG] 从问题推断output_key: {output_key} = {user_answer}")
+                                else:
+                                    # 默认设置到user_answer
+                                    session.active_task.execution_state.set_artifact("user_answer", user_answer)
+                                    print(f"[DEBUG] 默认设置用户答案到 user_answer: {user_answer}")
 
                         # 使用现有的active_task继续编排 - 使用resume标识符避免重新规划
                         result = await self.orchestrator.orchestrate(user_query="RESUME_TASK", context=context, active_task=session.active_task)

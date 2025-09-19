@@ -563,7 +563,16 @@ class Orchestrator:
                                 result.pending_questions = questions
                                 logger.info(f"设置pending_questions: {questions}")
 
-                    # pending_ask会在UI层通过session状态管理
+                                # 同时设置session的pending_ask（用于UI层的状态管理）
+                                session_id = context.get("session_id") if context else None
+                                if session_id:
+                                    from orchestrator import get_session
+                                    session = get_session(session_id)
+                                    # 生成ask_id并设置pending_ask
+                                    ask_id = ask_user_pending.get("step_id", f"ask_{int(time.time())}")
+                                    session.set_pending_ask(questions[0], ask_id)
+                                    logger.info(f"设置session pending_ask: {questions[0]} (ask_id: {ask_id})")
+
                     break
 
                 self.post_mortem_logger.log_phase_end(current_state.value, "completed")
