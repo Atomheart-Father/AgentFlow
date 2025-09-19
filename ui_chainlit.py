@@ -267,57 +267,61 @@ async def handle_complex_plan(user_input: str, session_id: str):
 
         # 用于收集侧栏日志
         sidebar_logs = []
+        # 累积assistant_content
+        full_content = ""
 
         # 正确处理异步生成器 - agent_core._process_with_m3_stream是async def
         async for event in agent_core._process_with_m3_stream(user_input, context={"session_id": session_id}):
-                event_type = event.get("type", "")
-                message = event.get("message", "")
+            event_type = event.get("type", "")
+            message = event.get("message", "")
 
-                if event_type == "assistant_content":
-                    # 真·流式：逐token输出
-                    content_delta = event.get("content", "")
-                    if content_delta:
-                        await assistant_msg.stream_token(content_delta)
-                        await asyncio.sleep(0)  # 让事件循环flush
+            if event_type == "assistant_content":
+                # 真·流式：逐token输出
+                content_delta = event.get("content", "")
+                if content_delta:
+                    await assistant_msg.stream_token(content_delta)
+                    full_content += content_delta  # 累积内容
+                    await asyncio.sleep(0)  # 让事件循环flush
 
-                elif event_type in ["status", "tool_trace", "debug"]:
-                    # 事件分流：进入侧栏
-                    if message:
-                        log_entry = f"🔄 {message}"
-                        sidebar_logs.append(log_entry)
+            elif event_type in ["status", "tool_trace", "debug"]:
+                # 事件分流：进入侧栏
+                if message:
+                    log_entry = f"🔄 {message}"
+                    sidebar_logs.append(log_entry)
 
-                        # 创建侧栏消息
-                        await cl.Message(
-                            content=log_entry,
-                            author="系统日志"
-                        ).send()
-
-                elif event_type == "ask_user":
-                    # AskUser优化：发问即返回，下条消息resume
-                    question = event.get("question", "请提供更多信息")
-                    context_info = event.get("context", "")
-
-                    # 显示问题并设置等待状态
-                    ask_msg = await cl.Message(
-                        content=f"🤔 {question}\n\n请直接回复，我将继续处理。",
-                        author="助手"
+                    # 创建侧栏消息
+                    await cl.Message(
+                        content=log_entry,
+                        author="系统日志"
                     ).send()
 
-                    # 设置前端等待状态
-                    cl.user_session.set("waiting_for_user_input", True)
+            elif event_type == "ask_user":
+                # AskUser优化：发问即返回，下条消息resume
+                question = event.get("question", "请提供更多信息")
+                context_info = event.get("context", "")
 
-                    # 设置后端pending_ask状态
-                    session = get_session(session_id)
-                    session.set_pending_ask(question, "answer")
+                # 显示问题并设置等待状态
+                ask_msg = await cl.Message(
+                    content=f"🤔 {question}\n\n请直接回复，我将继续处理。",
+                    author="助手"
+                ).send()
 
-                    # 立即返回，不继续处理（避免超时）
-                    return
+                # 设置前端等待状态
+                cl.user_session.set("waiting_for_user_input", True)
 
-                elif event_type == "error":
-                    # 错误处理
-                    error_msg = event.get("message", "未知错误")
-                    await assistant_msg.stream_token(f"\n\n❌ {error_msg}")
-                    break
+                # 设置后端pending_ask状态
+                session = get_session(session_id)
+                session.set_pending_ask(question, "answer")
+
+                # 立即返回，不继续处理（避免超时）
+                return
+
+            elif event_type == "error":
+                # 错误处理
+                error_msg = event.get("message", "未知错误")
+                await assistant_msg.stream_token(f"\n\n❌ {error_msg}")
+                full_content += f"\n\n❌ {error_msg}"  # 累积错误内容
+                break
 
         # 完成流式输出
         await assistant_msg.update()

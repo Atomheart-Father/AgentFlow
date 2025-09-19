@@ -591,6 +591,7 @@ class AgentCore:
                 result = await self.orchestrator.orchestrate(user_query=user_query, context=context)
 
             # 检查是否需要用户输入
+            print(f"[DEBUG] 检查ask_user状态 - status: {result.status}, pending_questions: {result.pending_questions}")
             if result.status == "ask_user" and result.pending_questions:
                 question = result.pending_questions[0]
                 print(f"[DEBUG] 发送 ask_user 事件: {question}")
