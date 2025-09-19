@@ -30,9 +30,9 @@ async def on_chat_start():
     config = get_config()
     agent_core = create_agent_core_with_llm(use_m3=True)
 
-    # 创建会话ID
-    session_id = str(uuid.uuid4())
-    cl.user_session.set("session_id", session_id)
+    # 创建会话ID - 使用session管理器
+    from session_manager import session_manager
+    session_id = session_manager.get_or_create_session_id(cl.user_session)
 
     # 初始化侧栏状态
     cl.user_session.set("sidebar_logs", [])
@@ -53,10 +53,7 @@ async def on_message(message: cl.Message):
         await cl.Message(content="❌ Agent 未初始化，请刷新页面重试").send()
         return
 
-    session_id = cl.user_session.get("session_id")
-    if not session_id:
-        await cl.Message(content="❌ 会话ID丢失，请刷新页面").send()
-        return
+    session_id = session_manager.get_or_create_session_id(cl.user_session)
 
     # 立即显示用户输入
     user_msg = cl.Message(content=message.content, author="用户")
@@ -121,8 +118,8 @@ async def handle_resume_with_answer(user_answer: str, session_id: str):
 
     # 验证ask_id一致性
     current_ask_id = cl.user_session.get("current_ask_id", "")
-    if pending_ask and hasattr(pending_ask, 'ask_id') and current_ask_id != pending_ask.ask_id:
-        await cl.Message(content=f"❌ AskID不匹配: 期望 {current_ask_id}, 收到 {pending_ask.ask_id}", author="系统").send()
+    if not session_manager.validate_ask_id_consistency(session, current_ask_id):
+        await cl.Message(content=f"❌ AskID不匹配或状态异常，请重新开始任务", author="系统").send()
         return
 
     # 发送ask_user_close事件
@@ -134,8 +131,7 @@ async def handle_resume_with_answer(user_answer: str, session_id: str):
     session.clear_pending_ask()
 
     # 清除前端状态
-    cl.user_session.set("waiting_for_user_input", False)
-    cl.user_session.set("current_ask_id", "")
+    session_manager.cleanup_session_state(cl.user_session)
 
     try:
         # 调试信息：检查session状态
