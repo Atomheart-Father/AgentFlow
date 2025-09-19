@@ -5,7 +5,7 @@ Telemetry v1 模块
 import json
 import time
 import uuid
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List
 from pathlib import Path
 from enum import Enum
 
