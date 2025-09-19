@@ -215,48 +215,29 @@ async def handle_resume_with_answer(user_answer: str, session_id: str):
                 await cl.Message(content="❌ 会话状态丢失，请重新开始任务", author="助手").send()
                 return
 
-        # 将用户答案设置到active_task的execution_state中
+        # 使用统一的resume_with_answer函数处理用户回答
+        from sessions import resume_with_answer
+
+        # 获取ask_user_pending中的信息
+        output_key = None
         if session.active_task and session.active_task.execution_state:
-            # 查找ask_user_pending并设置答案
             ask_user_pending = session.active_task.execution_state.get_artifact("ask_user_pending")
-            if ask_user_pending and isinstance(ask_user_pending, dict):
-                # 根据expects字段确定正确的output_key
-                expects = ask_user_pending.get("expects", "answer")
-                if expects == "city":
-                    output_key = "user_city"
-                elif expects == "date":
-                    output_key = "user_date"
-                else:
-                    output_key = ask_user_pending.get("output_key", "user_answer")
+            if ask_user_pending:
+                output_key = ask_user_pending.get("output_key")
 
-                session.active_task.execution_state.set_artifact(output_key, user_answer)
-                # 清除pending状态
-                session.active_task.execution_state.set_artifact("ask_user_pending", None)
-                print(f"[DEBUG] 在UI层设置用户答案: {output_key} = {user_answer}")
+        # 调用统一的用户回答处理函数
+        updated_session = resume_with_answer(
+            session_id=session_id,
+            answer=user_answer,
+            ask_id=current_ask_id,
+            output_key=output_key
+        )
 
-                # 调试：打印所有artifacts
-                all_artifacts = session.active_task.execution_state.artifacts
-                print(f"[DEBUG] 当前execution_state artifacts: {list(all_artifacts.keys())}")
-                for k, v in all_artifacts.items():
-                    print(f"[DEBUG]   {k}: {v}")
-            else:
-                print(f"[DEBUG] ask_user_pending not found or not dict: {ask_user_pending}")
+        if not updated_session:
+            await cl.Message(content="❌ 处理用户回答失败，请重试", author="系统").send()
+            return
 
-                # 如果没有ask_user_pending，尝试从pending_ask中推断output_key
-                if session.pending_ask and hasattr(session.pending_ask, 'expects'):
-                    # 根据问题类型推断output_key
-                    question = session.pending_ask.question.lower()
-                    if "城市" in question or "city" in question:
-                        output_key = "user_location"
-                    elif "日期" in question or "时间" in question or "date" in question or "time" in question:
-                        output_key = "user_date"
-                    else:
-                        output_key = "user_answer"
-
-                    session.active_task.execution_state.set_artifact(output_key, user_answer)
-                    print(f"[DEBUG] 从问题推断output_key: {output_key} = {user_answer}")
-        else:
-            print(f"[DEBUG] session.active_task或execution_state is None")
+        print(f"[DEBUG] 用户回答已通过resume_with_answer函数处理完成")
 
         # 使用agent_core继续处理，传递包含active_task的上下文
         context = {

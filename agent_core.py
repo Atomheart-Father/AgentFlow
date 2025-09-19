@@ -687,25 +687,38 @@ class AgentCore:
 
             # 统一处理ask_user和waiting_for_user状态
             if result.status in ("ask_user", "waiting_for_user") and result.pending_questions:
-                # 从ask_user_pending中提取ask_id和step_id，确保前后端一致
+                # 从ask_user_pending中提取所有必要字段，确保前后端一致
                 ask_user_pending = result.execution_state.get_artifact("ask_user_pending")
                 if ask_user_pending:
                     ask_id = ask_user_pending.get("ask_id", f"ask_{int(asyncio.get_event_loop().time())}")
                     step_id = ask_user_pending.get("step_id", "")
+                    expects = ask_user_pending.get("expects", "answer")  # 关键：补发expects
+                    output_key = ask_user_pending.get("output_key", "user_answer")  # 关键：补发output_key
                     question = result.pending_questions[0]
                 else:
-                    # 后备方案：生成新的ask_id
+                    # 后备方案：生成新的ask_id和默认值
                     ask_id = f"ask_{int(asyncio.get_event_loop().time())}"
                     step_id = ""
+                    expects = "answer"
+                    output_key = "user_answer"
                     question = result.pending_questions[0]
 
-                print(f"[DEBUG] 发送 ask_user_open 事件: {question} (ask_id: {ask_id})")
+                print(f"[DEBUG] 发送 ask_user_open 事件: {question} (ask_id: {ask_id}, expects: {expects}, output_key: {output_key})")
                 telemetry_logger.log_event(
                     stage=TelemetryStage.ASK_USER,
-                    event=TelemetryEvent.ASK_USER_IGNORED,
-                    context={"ask_id": ask_id, "question": question, "step_id": step_id, "action": "open"}
+                    event=TelemetryEvent.ASK_USER_OPEN,  # 使用现有事件名
+                    context={"ask_id": ask_id, "question": question, "step_id": step_id, "expects": expects, "output_key": output_key, "action": "open"}
                 )
-                yield {"type": "ask_user_open", "payload": {"ask_id": ask_id, "question": question, "step_id": step_id}}
+                yield {
+                    "type": "ask_user_open",
+                    "payload": {
+                        "ask_id": ask_id,
+                        "step_id": step_id,
+                        "question": question,
+                        "expects": expects,       # ✅ 新增：期望答案类型
+                        "output_key": output_key  # ✅ 新增：答案存放键
+                    }
+                }
                 return  # 等待用户输入，不要继续执行
 
             # 状态：开始执行

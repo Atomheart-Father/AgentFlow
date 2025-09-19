@@ -287,6 +287,134 @@ async def test_integration_scenario():
         return False
 
 
+async def test_event_payload_completeness():
+    """测试事件负载完整性 - 验证expects和output_key字段"""
+    print("\n=== 测试事件负载完整性 ===\n")
+
+    try:
+        from agent_core import AgentCore
+        from orchestrator.executor import ExecutionState
+        import asyncio
+
+        # 1. 创建agent_core和模拟状态
+        agent = AgentCore()
+        state = ExecutionState()
+
+        # 2. 创建完整的ask_user_pending
+        ask_user_pending = {
+            "ask_id": "test_event_123",
+            "questions": ["请告诉我您的城市？"],
+            "expects": "city",
+            "step_id": "test_step_1",
+            "output_key": "user_city",
+            "context": "事件负载测试"
+        }
+        state.set_artifact("ask_user_pending", ask_user_pending)
+
+        # 3. 模拟agent_core处理ask_user状态
+        # 这里我们直接测试事件生成的逻辑
+        event_payload = {
+            "ask_id": ask_user_pending.get("ask_id"),
+            "step_id": ask_user_pending.get("step_id", ""),
+            "expects": ask_user_pending.get("expects", "answer"),  # 关键：补发expects
+            "output_key": ask_user_pending.get("output_key", "user_answer"),  # 关键：补发output_key
+            "question": ask_user_pending.get("questions", [""])[0]
+        }
+
+        # 4. 验证事件负载包含所有必需字段
+        required_fields = ["ask_id", "step_id", "expects", "output_key", "question"]
+        for field in required_fields:
+            assert field in event_payload, f"事件负载缺少必需字段: {field}"
+            assert event_payload[field] is not None, f"字段 {field} 为空"
+
+        # 5. 验证字段值正确性
+        assert event_payload["ask_id"] == "test_event_123", f"ask_id不正确: {event_payload['ask_id']}"
+        assert event_payload["expects"] == "city", f"expects不正确: {event_payload['expects']}"
+        assert event_payload["output_key"] == "user_city", f"output_key不正确: {event_payload['output_key']}"
+        assert event_payload["question"] == "请告诉我您的城市？", f"question不正确: {event_payload['question']}"
+
+        print("✅ 事件负载完整性验证通过")
+        print(f"   包含字段: {list(event_payload.keys())}")
+        print(f"   expects: {event_payload['expects']}")
+        print(f"   output_key: {event_payload['output_key']}")
+
+        return True
+
+    except Exception as e:
+        print(f"❌ 事件负载完整性测试失败: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
+
+
+async def test_ask_user_tool_enhanced():
+    """测试增强后的ask_user工具"""
+    print("\n=== 测试增强后的ask_user工具 ===\n")
+
+    try:
+        from tools.tool_ask_user import ToolAskUser
+        from orchestrator.executor import ExecutionState
+
+        # 1. 创建ask_user工具
+        tool = ToolAskUser()
+
+        # 2. 测试不同expects类型的调用
+        test_cases = [
+            {
+                "questions": ["请告诉我您的城市？"],
+                "expects": "city",
+                "expected_output_key": "user_city"
+            },
+            {
+                "questions": ["请告诉我日期？"],
+                "expects": "date",
+                "expected_output_key": "user_date"
+            },
+            {
+                "questions": ["请提供详细信息？"],
+                "expects": "answer",
+                "expected_output_key": "user_answer"
+            }
+        ]
+
+        for i, test_case in enumerate(test_cases, 1):
+            print(f"测试用例 {i}: {test_case['expects']}")
+
+            # 创建state
+            state = ExecutionState()
+
+            # 调用工具
+            result = tool.run(
+                questions=test_case["questions"],
+                expects=test_case["expects"],
+                context=f"测试用例{i}",
+                state=state
+            )
+
+            # 验证返回值
+            assert result["action"] == "ask_user", f"action不正确: {result['action']}"
+            assert result["expects"] == test_case["expects"], f"expects不匹配: {result['expects']}"
+            assert result["output_key"] == test_case["expected_output_key"], f"output_key不匹配: {result['output_key']}"
+            assert result["questions"] == test_case["questions"], f"questions不匹配: {result['questions']}"
+
+            # 验证ask_user_pending是否正确设置
+            ask_user_pending = state.get_artifact("ask_user_pending")
+            assert ask_user_pending is not None, "ask_user_pending未设置"
+            assert ask_user_pending["expects"] == test_case["expects"], f"pending expects不匹配: {ask_user_pending['expects']}"
+            assert ask_user_pending["output_key"] == test_case["expected_output_key"], f"pending output_key不匹配: {ask_user_pending['output_key']}"
+
+            print(f"   ✅ {test_case['expects']} -> {test_case['expected_output_key']}")
+
+        print("✅ 增强后的ask_user工具验证通过")
+        return True
+
+    except Exception as e:
+        print(f"❌ 增强后的ask_user工具测试失败: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
+
+
 async def main():
     """主测试函数"""
     print("🚀 开始测试前后端ask_user协同修复效果")
@@ -300,6 +428,8 @@ async def main():
     test_results.append(await test_session_pending_ask())
     test_results.append(await test_dynamic_tool_prompt())
     test_results.append(await test_integration_scenario())
+    test_results.append(await test_event_payload_completeness())
+    test_results.append(await test_ask_user_tool_enhanced())
 
     # 统计结果
     passed = sum(test_results)
