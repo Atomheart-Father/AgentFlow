@@ -244,7 +244,7 @@ async def handle_resume_with_answer(user_answer: str, session_id: str):
             "session_id": session_id,
             "user_answer": user_answer,
             "resume_task": True,  # 标记这是续跑场景
-            "pending_question": pending_ask.question if pending_ask else None
+            "pending_question": session.pending_ask.question if session.pending_ask else None
         }
 
         # 创建新的assistant消息用于流式输出
