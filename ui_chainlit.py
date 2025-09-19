@@ -131,15 +131,27 @@ async def handle_resume_with_answer(user_answer: str, session_id: str):
         print(f"[DEBUG] session id: {id(session)}")
         print(f"[DEBUG] session type: {type(session)}")
 
+        # 检查全局会话存储
+        from orchestrator.orchestrator import _sessions
+        print(f"[DEBUG] 全局存储中的session数量: {len(_sessions)}")
+        print(f"[DEBUG] session_id在全局存储中: {session_id in _sessions}")
+
+        if session_id in _sessions:
+            global_session = _sessions[session_id]
+            print(f"[DEBUG] 全局session.active_task: {global_session.active_task}")
+            print(f"[DEBUG] 全局session.pending_ask: {global_session.pending_ask}")
+
         # 确保session有active_task状态
         if not session.active_task:
             # 尝试从全局会话存储中恢复
-            from orchestrator.orchestrator import _sessions
             if session_id in _sessions:
                 global_session = _sessions[session_id]
                 if global_session.active_task:
                     session.active_task = global_session.active_task
                     print(f"[DEBUG] 从全局存储恢复active_task成功")
+                    print(f"[DEBUG] 恢复的active_task: {session.active_task}")
+                    print(f"[DEBUG] 恢复的plan: {session.active_task.plan}")
+                    print(f"[DEBUG] 恢复的execution_state: {session.active_task.execution_state}")
                 else:
                     print(f"[DEBUG] 全局存储中也没有active_task")
 
