@@ -81,6 +81,11 @@ def load_tools(whitelist: List[str] = None) -> List[Tool]:
     for py_file in tools_dir.glob("tool_*.py"):
         module_name = py_file.stem  # tool_weather -> tool_weather
 
+        # 跳过空文件或预留的工具文件
+        if py_file.stat().st_size == 0:
+            logger.debug(f"跳过空工具文件: {module_name}")
+            continue
+
         try:
             # 动态导入模块
             module = importlib.import_module(f"tools.{module_name}")
@@ -299,7 +304,6 @@ def _load_tools(whitelist: List[str] = None) -> List[Tool]:
         "tools.tool_fs_write",
         "tools.tool_math",
         "tools.tool_websearch",
-        "tools.tool_datetime",
         "tools.tool_date_utils",
         "tools.tool_ask_user",
     ]
@@ -307,7 +311,7 @@ def _load_tools(whitelist: List[str] = None) -> List[Tool]:
     for module_name in tool_modules:
         try:
             logger.debug(f"加载工具模块: {module_name}")
-            module = __import__(module_name, fromlist=["ToolWeather", "ToolTime", "ToolCalculator", "ToolCalendar", "ToolEmail", "ToolFileReader", "ToolFileWriter", "ToolFSWrite", "ToolMath", "ToolWebSearch", "ToolDateTime", "ToolDateNormalizer", "ToolAskUser"])
+            module = __import__(module_name, fromlist=["ToolWeather", "ToolTime", "ToolCalculator", "ToolCalendar", "ToolEmail", "ToolFileReader", "ToolFileWriter", "ToolFSWrite", "ToolMath", "ToolWebSearch", "ToolDateNormalizer", "ToolAskUser"])
 
             # 获取工具类
             tool_classes = []
