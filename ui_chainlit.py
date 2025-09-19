@@ -170,6 +170,16 @@ async def handle_resume_with_answer(user_answer: str, session_id: str):
                 session.active_task.execution_state.set_artifact("ask_user_pending", None)
                 print(f"[DEBUG] 在UI层设置用户答案: {output_key} = {user_answer}")
 
+                # 调试：打印所有artifacts
+                all_artifacts = session.active_task.execution_state.artifacts
+                print(f"[DEBUG] 当前execution_state artifacts: {list(all_artifacts.keys())}")
+                for k, v in all_artifacts.items():
+                    print(f"[DEBUG]   {k}: {v}")
+            else:
+                print(f"[DEBUG] ask_user_pending not found or not dict: {ask_user_pending}")
+        else:
+            print(f"[DEBUG] session.active_task.execution_state is None")
+
         # 使用agent_core继续处理，传递包含active_task的上下文
         context = {
             "session_id": session_id,

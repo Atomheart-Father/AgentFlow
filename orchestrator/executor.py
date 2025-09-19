@@ -42,13 +42,17 @@ class ExecutionState:
     def interpolate_inputs(self, inputs: Dict[str, Any]) -> Dict[str, Any]:
         """插值替换输入参数中的变量"""
         result = {}
+        print(f"[DEBUG] interpolate_inputs 开始处理输入: {inputs}")
+        print(f"[DEBUG] 当前artifacts: {list(self.artifacts.keys())}")
 
         for key, value in inputs.items():
             if isinstance(value, str):
+                original_value = value
                 # 替换 {{variable}} 格式的变量
                 for artifact_key, artifact_value in self.artifacts.items():
                     placeholder = "{{" + artifact_key + "}}"
                     if placeholder in value:
+                        print(f"[DEBUG] 发现变量引用: {placeholder} in {original_value}, artifact_value: {artifact_value}")
                         # 特殊处理不同类型的结果
                         if artifact_key == "file_path" and isinstance(artifact_value, dict) and "resolved_path" in artifact_value:
                             # path_planner的结果：提取resolved_path
@@ -89,6 +93,7 @@ class ExecutionState:
 
             result[key] = value
 
+        print(f"[DEBUG] interpolate_inputs 完成处理，结果: {result}")
         return result
 
 
@@ -326,6 +331,9 @@ class Executor:
 
     async def _execute_summarize(self, step: PlanStep, inputs: Dict[str, Any], state: ExecutionState):
         """执行智能总结操作 - 根据任务类型灵活调整"""
+        print(f"[DEBUG] _execute_summarize 开始执行，step.id: {step.id}")
+        print(f"[DEBUG] _execute_summarize inputs: {inputs}")
+
         # 获取任务上下文
         user_query = getattr(state, 'user_query', '未知任务')
         expect_desc = getattr(step, 'expect', '')
@@ -348,13 +356,18 @@ class Executor:
                     parts.append(f"{k}: {v}")
             summary_text = "\n".join(parts) if parts else "(无内容)"
 
+        print(f"[DEBUG] _execute_summarize summary_text: {summary_text[:200]}...")
+
         # 根据任务类型和期望动态生成提示词
         system_prompt = self._generate_smart_summary_prompt(user_query, expect_desc, summary_text)
+        print(f"[DEBUG] _execute_summarize system_prompt: {system_prompt[:200]}...")
 
         messages = [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": f"请处理以下内容：\n\n{summary_text}"}
         ]
+
+        print(f"[DEBUG] _execute_summarize LLM输入内容长度: {len(summary_text)}")
 
         response = await self.llm.generate(
             messages=messages,
