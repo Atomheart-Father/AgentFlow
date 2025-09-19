@@ -606,11 +606,9 @@ class AgentCore:
                                 "asked_questions": list(session.active_task.execution_state.asked_questions)
                             }
                             # 临时将execution_state设置为字典格式
-                            original_execution_state = session.active_task.execution_state
                             session.active_task.execution_state = execution_state_dict
                             result = await self.orchestrator.orchestrate(user_query="RESUME_TASK", context=context, active_task=session.active_task)
-                            # 恢复原始execution_state
-                            session.active_task.execution_state = original_execution_state
+                            # 重要：不要恢复原始execution_state，使用orchestrator返回的结果
                         else:
                             result = await self.orchestrator.orchestrate(user_query="RESUME_TASK", context=context, active_task=session.active_task)
                     else:
