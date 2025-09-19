@@ -164,6 +164,8 @@ class Executor:
                 # 如果在步骤执行过程中产生了待询问用户的问题，则立即暂停执行，等待用户输入
                 if state.get_artifact("ask_user_pending"):
                     logger.info("检测到ask_user_pending，暂停执行等待用户输入")
+                    # 即使暂停，也要标记ask_user步骤为完成，因为它已经成功执行了询问逻辑
+                    state.completed_steps.append(step.id)
                     return state
 
                 # 标记步骤为完成（仅当未进入等待用户输入状态时）
