@@ -181,42 +181,65 @@ async def handle_resume_with_answer(user_answer: str, session_id: str):
         # 创建新的assistant消息用于流式输出
         assistant_msg = await cl.Message(content="", author="助手").send()
 
+        # 用于收集侧栏日志
+        sidebar_logs = []
+        # 累积assistant_content
+        full_content = ""
+
         # 使用agent_core的流式处理方法继续执行（传递session的active_task）
-        from orchestrator import Orchestrator
-        orchestrator = Orchestrator()
+        async for event in agent_core._process_with_m3_stream("", context=context):
+            event_type = event.get("type", "")
+            message = event.get("message", "")
 
-        # 直接调用orchestrator继续执行
-        result = await orchestrator.orchestrate("", context=context, active_task=session.active_task)
+            if event_type == "assistant_content":
+                # 真·流式：逐token输出
+                content_delta = event.get("content", "")
+                if content_delta:
+                    await assistant_msg.stream_token(content_delta)
+                    full_content += content_delta  # 累积内容
+                    await asyncio.sleep(0)  # 让事件循环flush
 
-        # 处理结果
-        if result.status == "ask_user" and result.pending_questions:
-            # 如果又有新问题，设置新的pending状态
-            new_question = result.pending_questions[0]
-            await cl.Message(
-                content=f"🤔 {new_question}\n\n请直接回复，我将继续处理。",
-                author="助手"
-            ).send()
-            session.set_pending_ask(new_question, "answer")
-            cl.user_session.set("waiting_for_user_input", True)
-            return
+            elif event_type in ["status", "tool_trace", "debug"]:
+                # 事件分流：进入侧栏
+                if message:
+                    log_entry = f"🔄 {message}"
+                    sidebar_logs.append(log_entry)
 
-        elif result.final_answer:
-            # 任务完成
-            await assistant_msg.stream_token(result.final_answer)
-            await assistant_msg.update()
-        else:
-            # 其他状态
-            status_msg = f"任务状态: {result.status}"
-            await assistant_msg.stream_token(status_msg)
-            await assistant_msg.update()
+                    # 创建侧栏消息
+                    await cl.Message(
+                        content=log_entry,
+                        author="系统日志"
+                    ).send()
 
-        # 添加完成标记
+            elif event_type == "ask_user":
+                # 如果又有新问题，设置新的pending状态
+                question = event.get("question", "请提供更多信息")
+                ask_msg = await cl.Message(
+                    content=f"🤔 {question}\n\n请直接回复，我将继续处理。",
+                    author="助手"
+                ).send()
+                session.set_pending_ask(question, "answer")
+                cl.user_session.set("waiting_for_user_input", True)
+                return
+
+            elif event_type == "error":
+                # 错误处理
+                error_msg = event.get("message", "未知错误")
+                await assistant_msg.stream_token(f"\n\n❌ {error_msg}")
+                full_content += f"\n\n❌ {error_msg}"  # 累积错误内容
+                break
+
+        # 完成流式输出
+        await assistant_msg.update()
+
+        # 添加完成标记到侧栏
         completion_log = "✅ 任务继续完成"
         await cl.Message(content=completion_log, author="系统日志").send()
 
         # 记录助手回复到对话历史
-        if result.final_answer:
-            session.add_message("assistant", result.final_answer)
+        session = get_session(session_id)
+        if full_content:
+            session.add_message("assistant", full_content)
 
     except Exception as e:
         error_msg = await cl.Message(content=f"❌ 续跑失败: {str(e)}", author="助手").send()
