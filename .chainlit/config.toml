@@ -19,6 +19,14 @@ persist_user_env = false
 # Set to true to show API keys as ***, false to show them as plain text
 mask_user_env = false
 
+# 单worker配置确保session粘性，避免多进程导致的状态丢失
+[server]
+# 强制单worker模式
+workers = 1
+# WebSocket ping配置
+websocket_ping_interval = 30
+websocket_ping_timeout = 300
+
 # Authorized origins
 allow_origins = ["*"]
 

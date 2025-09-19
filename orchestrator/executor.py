@@ -179,6 +179,12 @@ class Executor:
                     ask_id = state.get_artifact("ask_user_pending").get("ask_id", "")
                     if ask_id:
                         state.asked_map[current_step.step_id] = ask_id
+
+                    # 立即持久化状态（包含pending_ask信息）
+                    from session_manager import session_manager
+                    session_id = context.get("session_id", "unknown") if context else "unknown"
+                    session_manager.save_execution_state(session_id, state)
+
                     return state
 
                 # 步骤执行成功，标记为完成并前进指针
@@ -186,6 +192,11 @@ class Executor:
                 state.completed_steps.append(current_step.id)  # 保持遗留兼容性
                 state.cursor_index += 1
                 logger.info(f"步骤 {current_step.id} 执行完成，指针前进到: {state.cursor_index}")
+
+                # 立即持久化状态
+                from session_manager import session_manager
+                session_id = context.get("session_id", "unknown") if context else "unknown"
+                session_manager.save_execution_state(session_id, state)
 
             except Exception as e:
                 # 记录执行错误

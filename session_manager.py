@@ -2,6 +2,9 @@
 Session管理器 - 处理session_id绑定和粘性会话
 """
 import uuid
+import json
+import os
+from pathlib import Path
 from typing import Optional, Dict, Any
 import logging
 
@@ -66,6 +69,61 @@ class SessionManager:
         cl_user_session.set("waiting_for_user_input", False)
         cl_user_session.set("current_ask_id", "")
         logger.debug("清理session状态完成")
+
+    @staticmethod
+    def save_execution_state(session_id: str, execution_state):
+        """保存execution_state到磁盘"""
+        try:
+            # 创建session目录
+            session_dir = Path("data/sessions")
+            session_dir.mkdir(parents=True, exist_ok=True)
+
+            # 保存execution_state
+            state_file = session_dir / f"{session_id}_execution.json"
+
+            # 使用Pydantic的model_dump进行序列化
+            if hasattr(execution_state, 'model_dump'):
+                state_data = execution_state.model_dump()
+            else:
+                # 回退到手动序列化
+                state_data = {
+                    "cursor_index": execution_state.cursor_index,
+                    "done_set": list(execution_state.done_set),
+                    "asked_map": dict(execution_state.asked_map),
+                    "answers": dict(execution_state.answers),
+                    "artifacts": dict(execution_state.artifacts),
+                    "errors": list(execution_state.errors),
+                    "completed_steps": list(execution_state.completed_steps),
+                    "asked_questions": list(execution_state.asked_questions)
+                }
+
+            with open(state_file, 'w', encoding='utf-8') as f:
+                json.dump(state_data, f, ensure_ascii=False, indent=2)
+
+            logger.debug(f"已保存execution_state到 {state_file}")
+
+        except Exception as e:
+            logger.error(f"保存execution_state失败: {e}")
+
+    @staticmethod
+    def load_execution_state(session_id: str):
+        """从磁盘加载execution_state"""
+        try:
+            state_file = Path("data/sessions") / f"{session_id}_execution.json"
+            if not state_file.exists():
+                return None
+
+            with open(state_file, 'r', encoding='utf-8') as f:
+                state_data = json.load(f)
+
+            # 这里应该返回反序列化的ExecutionState对象
+            # 但由于导入循环问题，我们先返回字典，让调用方处理
+            logger.debug(f"已加载execution_state从 {state_file}")
+            return state_data
+
+        except Exception as e:
+            logger.error(f"加载execution_state失败: {e}")
+            return None
 
     @staticmethod
     def log_session_event(session_id: str, event_type: str, details: Optional[Dict[str, Any]] = None):

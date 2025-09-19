@@ -101,9 +101,16 @@ def compute_step_id(step_dict: Dict[str, Any]) -> str:
         # 只包含schema结构，不包含运行时值
         signature_data["inputs_schema"] = {k: type(v).__name__ for k, v in inputs.items()}
 
-    # 对于ask_user，包含预期答案类型
+    # 对于ask_user，包含问题模式特征（避免文本变化导致ID变化）
     if step_dict.get("type") == "ask_user":
-        signature_data["question"] = step_dict.get("inputs", {}).get("question", "")
+        question = step_dict.get("inputs", {}).get("question", "")
+        # 提取问题模式：城市/日期/地点等关键词
+        if any(word in question.lower() for word in ["城市", "city", "地点", "location"]):
+            signature_data["question_type"] = "location"
+        elif any(word in question.lower() for word in ["日期", "时间", "date", "time", "when"]):
+            signature_data["question_type"] = "datetime"
+        else:
+            signature_data["question_type"] = "general"
 
     # 计算SHA1哈希，取前16位
     signature_str = json.dumps(signature_data, sort_keys=True, separators=(',', ':'))
