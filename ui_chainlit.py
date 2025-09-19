@@ -89,11 +89,11 @@ async def on_message(message: cl.Message):
     await routing_msg.send()
 
     if query_type == QueryType.SIMPLE_CHAT:
-        # 简单问答：直接用Chat模型
-        await handle_simple_chat(message.content, session_id)
+        # 简单问答：直接用快速Agent
+        await handle_simple_chat(routing_metadata.get("clean_query", message.content), session_id)
     else:
         # 复杂编排：走Planner→Executor→Judge
-        await handle_complex_plan(message.content, session_id)
+        await handle_complex_plan(routing_metadata.get("clean_query", message.content), session_id)
 
 
 async def handle_resume_with_answer(user_answer: str, session_id: str):

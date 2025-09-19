@@ -1,227 +1,221 @@
 """
-智能查询路由器 - 区分简单问答和复杂编排任务
-实现零开销启发式路由 + 可选LLM兜底分类
+智能路由器 - 区分chat vs orchestrate模式
 """
-
 import re
 from typing import Dict, Any, Tuple
 from enum import Enum
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 class QueryType(Enum):
-    """查询类型枚举"""
-    SIMPLE_CHAT = "simple"      # 简单问答，直接用Chat模型
-    COMPLEX_PLAN = "complex"    # 复杂任务，需要Planner→Executor→Judge
+    """查询类型（向后兼容）"""
+    SIMPLE_CHAT = "simple_chat"
+    COMPLEX_PLAN = "complex_plan"
+
+
+class RouteMode(Enum):
+    """路由模式"""
+    CHAT = "chat"
+    ORCHESTRATE = "orchestrate"
 
 
 class QueryRouter:
-    """智能查询路由器"""
+    """查询路由器"""
 
     def __init__(self):
-        # 复杂任务的关键词模式
-        self.complex_patterns = [
-            # 时序相关
-            r'\b(?:明天|后天|今天|昨天|前天|下周|上周|明年|去年|日期|时间|几号|星期|周几)\b',
-            r'\b(?:tomorrow|yesterday|next week|last week|date|time|schedule)\b',
+        # 强制模式前缀
+        self.force_chat_prefixes = ["/chat", "!chat", "chat:"]
+        self.force_orchestrate_prefixes = ["/plan", "/orchestrate", "!plan", "!orchestrate", "plan:"]
 
-            # 天气相关 - 增强检测
-            r'\b(?:天气|气温|降雨|下雨|晴天|阴天|多云|雨天|雪|风|湿度|气压)\b',
-            r'\b(?:weather|temperature|rain|sunny|cloudy|wind|humidity|pressure)\b',
-            r'\b(?:查.*天气|看.*天气|问.*天气|了解.*天气)\b',
+        # Orchestrate关键词（需要复杂编排的场景）
+        self.orchestrate_keywords = [
+            # 时间相关
+            "明天", "今天", "昨天", "日期", "时间", "几点", "什么时候",
+            "date", "time", "tomorrow", "today", "yesterday", "when",
 
-            # 规划和任务相关 - 增强检测
-            r'\b(?:计划|规划|安排|步骤|执行|完成|总结|分析|制定|准备)\b',
-            r'\b(?:plan|schedule|arrange|steps|execute|complete|summary|analyze|formulate|prepare)\b',
-            r'\b(?:怎么.*规划|如何.*规划|制定.*计划)\b',
+            # 文件操作
+            "写", "保存", "创建", "写入", "导出", "保存到", "写到",
+            "write", "save", "create", "export", "save to",
 
-            # 文件操作相关
-            r'\b(?:生成文件|保存|写入|创建|写到桌面|md|txt|json|文档|报告)\b',
-            r'\b(?:generate file|save|write|create|markdown|text|json|document|report)\b',
+            # 工具调用
+            "搜索", "查询", "查找", "计算", "计算器", "天气", "地图",
+            "search", "query", "find", "calculate", "weather", "map",
 
-            # 工具调用相关
-            r'\b(?:搜索|查找|计算|换算|邮件|日历|工具|RAG|引用|浏览)\b',
-            r'\b(?:search|find|calculate|convert|email|calendar|tool|browse)\b',
+            # RAG相关
+            "文档", "知识库", "资料", "文件", "笔记",
+            "document", "knowledge", "file", "note",
 
-            # 复杂指令 - 增强动词组合
-            r'\b(?:帮我|请|需要|要求|必须|应该|能否|可以)\b.*\b(?:查|找|做|写|算|分析|生成|创建|规划)\b',
-            r'\b(?:help me|please|need|require|must|should|could|can)\b.*\b(?:check|find|do|write|calculate|analyze|generate|create|plan)\b',
+            # 复杂任务
+            "规划", "计划", "安排", "组织", "整理",
+            "plan", "schedule", "organize", "arrange",
 
-            # 报告和文档生成
-            r'\b(?:写.*报告|生成.*文档|创建.*文件|制作.*总结)\b',
-            r'\b(?:write.*report|generate.*document|create.*file|make.*summary)\b',
+            # 邮件相关
+            "邮件", "邮箱", "发邮件", "收邮件",
+            "email", "mail", "send", "receive",
+
+            # 日历相关
+            "日历", "日程", "会议", "提醒",
+            "calendar", "schedule", "meeting", "reminder",
+
+            # 网络操作
+            "网页", "网站", "抓取", "爬取",
+            "web", "website", "scrape", "crawl",
+
+            # 数据处理
+            "分析", "统计", "汇总", "报告",
+            "analyze", "statistics", "summary", "report",
+
+            # 多步骤任务
+            "先", "然后", "接着", "最后", "步骤",
+            "first", "then", "next", "finally", "step"
         ]
 
-        # 简单问答的否定模式（如果匹配这些，仍然走复杂流程）
-        self.force_complex_patterns = [
-            r'/plan\b',  # 强制编排
-            r'/complex\b',
+        # Chat关键词（简单对话场景）
+        self.chat_keywords = [
+            # 问候
+            "你好", "您好", "hello", "hi", "hey",
+
+            # 闲聊
+            "怎么样", "如何", "什么", "为什么", "怎么",
+            "how", "what", "why", "how",
+
+            # 个人问题
+            "你是谁", "你的名字", "介绍", "自我介绍",
+            "who are you", "your name", "introduce",
+
+            # 简单指令
+            "帮我", "请", "麻烦", "能否",
+            "help", "please", "can you",
+
+            # 情感表达
+            "谢谢", "感谢", "好的", "好的",
+            "thank", "thanks", "ok", "good"
         ]
 
-        # 强制简单问答的模式
-        self.force_simple_patterns = [
-            r'/chat\b',  # 强制直答
-            r'/simple\b',
-        ]
-
-    def route_query(self, query: str, use_llm_fallback: bool = False) -> Tuple[QueryType, Dict[str, Any]]:
-        """
-        路由查询到合适的处理路径
-
-        Args:
-            query: 用户查询
-            use_llm_fallback: 是否使用LLM兜底分类
-
-        Returns:
-            (QueryType, metadata)
-        """
-
-        # 1. 检查强制模式
-        for pattern in self.force_simple_patterns:
-            if re.search(pattern, query, re.IGNORECASE):
-                return QueryType.SIMPLE_CHAT, {"reason": "force_simple", "pattern": pattern}
-
-        for pattern in self.force_complex_patterns:
-            if re.search(pattern, query, re.IGNORECASE):
-                return QueryType.COMPLEX_PLAN, {"reason": "force_complex", "pattern": pattern}
-
-        # 2. 快速启发式路由
-        heuristic_result = self._heuristic_route(query)
-        if heuristic_result:
-            return heuristic_result
-
-        # 3. LLM兜底路由（可选）
-        if use_llm_fallback:
-            return self._llm_route(query)
-
-        # 4. 默认走简单模式
-        return QueryType.SIMPLE_CHAT, {"reason": "default_simple"}
-
-    def _heuristic_route(self, query: str) -> Tuple[QueryType, Dict[str, Any]] | None:
-        """
-        基于关键词的快速启发式路由
-
-        Returns:
-            如果能确定类型则返回，否则返回None
-        """
-
+    def _check_force_mode(self, query: str) -> Tuple[RouteMode, str]:
+        """检查是否强制指定模式"""
         query_lower = query.lower().strip()
+
+        # 检查强制chat模式
+        for prefix in self.force_chat_prefixes:
+            if query_lower.startswith(prefix):
+                clean_query = query[len(prefix):].strip()
+                return RouteMode.CHAT, f"用户强制指定chat模式: {prefix}"
+
+        # 检查强制orchestrate模式
+        for prefix in self.force_orchestrate_prefixes:
+            if query_lower.startswith(prefix):
+                clean_query = query[len(prefix):].strip()
+                return RouteMode.ORCHESTRATE, f"用户强制指定orchestrate模式: {prefix}"
+
+        return None, query
+
+    def _heuristic_route(self, query: str) -> Tuple[RouteMode, str]:
+        """启发式路由"""
+        query_lower = query.lower()
+
+        # 计算orchestrate关键词匹配数
+        orchestrate_score = 0
+        for keyword in self.orchestrate_keywords:
+            if keyword in query_lower:
+                orchestrate_score += 1
+
+        # 计算chat关键词匹配数
+        chat_score = 0
+        for keyword in self.chat_keywords:
+            if keyword in query_lower:
+                chat_score += 1
+
+        # 查询长度因素（长查询更可能是复杂任务）
         query_length = len(query)
 
-        # 检查是否匹配复杂任务模式
-        for pattern in self.complex_patterns:
-            if re.search(pattern, query_lower):
-                # 如果匹配关键词，即使查询较短也认为是复杂任务
-                confidence = 0.9 if query_length < 50 else 0.8
-                return QueryType.COMPLEX_PLAN, {
-                    "reason": "keyword_match",
-                    "pattern": pattern,
-                    "confidence": confidence
-                }
+        # 决策逻辑
+        if orchestrate_score > chat_score:
+            return RouteMode.ORCHESTRATE, f"检测到{orchestrate_score}个编排关键词"
+        elif orchestrate_score == 0 and chat_score > 0:
+            return RouteMode.CHAT, f"检测到{chat_score}个对话关键词"
+        elif query_length > 50:  # 长查询倾向于编排
+            return RouteMode.ORCHESTRATE, f"长查询({query_length}字符)倾向于编排"
+        elif query_length < 20:  # 短查询倾向于对话
+            return RouteMode.CHAT, f"短查询({query_length}字符)倾向于对话"
+        else:
+            # 灰区：默认使用orchestrate（更安全）
+            return RouteMode.ORCHESTRATE, f"灰区查询，默认使用编排模式(安全优先)"
 
-        # 基于长度和指令性的简单判断
-        has_instruction_words = any(word in query_lower for word in [
-            '帮我', '请', '需要', '要求', '必须', '应该', '分析', '计算', '查找', '搜索',
-            'help', 'please', 'need', 'require', 'must', 'should', 'analyze', 'calculate', 'find', 'search'
-        ])
+    def _advanced_route(self, query: str) -> Tuple[RouteMode, str]:
+        """高级路由（可选：使用小模型二分类）
+        这里可以集成一个轻量级模型来进行更准确的分类
+        """
+        # TODO: 实现小模型二分类
+        # 目前先使用启发式
+        return self._heuristic_route(query)
 
-        # 短查询且无指令性词语 -> 简单问答
-        if query_length < 80 and not has_instruction_words:
-            return QueryType.SIMPLE_CHAT, {
-                "reason": "short_simple",
-                "length": query_length,
-                "has_instruction": has_instruction_words,
-                "confidence": 0.7
+    def route(self, query: str) -> Dict[str, Any]:
+        """路由主函数"""
+        if not query or not query.strip():
+            return {
+                "mode": RouteMode.CHAT.value,
+                "reason": "空查询，使用chat模式"
             }
 
-        # 长查询或有指令性词语 -> 复杂任务
-        if query_length >= 80 or has_instruction_words:
-            return QueryType.COMPLEX_PLAN, {
-                "reason": "long_complex",
-                "length": query_length,
-                "has_instruction": has_instruction_words,
-                "confidence": 0.6
+        # 1. 检查强制模式
+        force_mode, clean_query = self._check_force_mode(query)
+        if force_mode:
+            return {
+                "mode": force_mode.value,
+                "reason": f"强制模式: {clean_query}",
+                "original_query": query,
+                "clean_query": clean_query
             }
 
-        # 无法确定，返回None使用兜底策略
-        return None
+        # 2. 高级路由（可配置）
+        use_advanced = False  # 可以从配置读取
+        if use_advanced:
+            mode, reason = self._advanced_route(clean_query)
+        else:
+            mode, reason = self._heuristic_route(clean_query)
 
-    def _llm_route(self, query: str) -> Tuple[QueryType, Dict[str, Any]]:
-        """
-        使用LLM进行兜底路由分类
-        注意：这里只是接口，实际实现需要LLM调用
-        """
-        # TODO: 实现LLM分类逻辑
-        # 这里可以调用一个轻量级模型进行二分类
-
-        return QueryType.SIMPLE_CHAT, {
-            "reason": "llm_fallback",
-            "confidence": 0.5
+        return {
+            "mode": mode.value,
+            "reason": reason,
+            "original_query": query,
+            "clean_query": clean_query
         }
-
-    def explain_routing(self, query_type: QueryType, metadata: Dict[str, Any]) -> str:
-        """解释路由决策原因"""
-        reason = metadata.get("reason", "unknown")
-
-        explanations = {
-            "force_simple": "检测到强制简单模式标记",
-            "force_complex": "检测到强制复杂模式标记",
-            "keyword_match": "匹配到复杂任务关键词",
-            "short_simple": "短查询，无复杂指令",
-            "long_complex": "长查询或包含复杂指令",
-            "llm_fallback": "LLM分类结果",
-            "default_simple": "默认简单模式"
-        }
-
-        explanation = explanations.get(reason, f"未知原因: {reason}")
-
-        if "pattern" in metadata:
-            explanation += f" (匹配模式: {metadata['pattern']})"
-
-        if "confidence" in metadata:
-            explanation += f" (置信度: {metadata['confidence']:.1f})"
-
-        return explanation
 
 
 # 全局路由器实例
-query_router = QueryRouter()
+router = QueryRouter()
 
 
-def route_query(query: str, use_llm_fallback: bool = False) -> Tuple[QueryType, Dict[str, Any]]:
-    """
-    便捷函数：路由查询
+def route_query(query: str) -> Tuple[QueryType, Dict[str, Any]]:
+    """便捷路由函数（向后兼容）"""
+    result = router.route(query)
 
-    Args:
-        query: 用户查询
-        use_llm_fallback: 是否使用LLM兜底
+    # 映射新的RouteMode到旧的QueryType
+    mode = result["mode"]
+    if mode == RouteMode.CHAT.value:
+        query_type = QueryType.SIMPLE_CHAT
+    else:  # orchestrate
+        query_type = QueryType.COMPLEX_PLAN
 
-    Returns:
-        (QueryType, metadata)
-    """
-    return query_router.route_query(query, use_llm_fallback)
-
-
-def explain_routing(query_type: QueryType, metadata: Dict[str, Any]) -> str:
-    """便捷函数：解释路由决策"""
-    return query_router.explain_routing(query_type, metadata)
+    return query_type, result
 
 
-if __name__ == "__main__":
-    # 测试路由器
-    test_queries = [
-        "你好",
-        "帮我查一下明天天气",
-        "1+1等于几",
-        "/chat 你是谁",
-        "/plan 帮我制定学习计划",
-        "请分析一下这个数据",
-        "今天天气怎么样",
-        "帮我写一个Python函数计算斐波那契数列"
-    ]
+def explain_routing(query_type: QueryType, routing_metadata: Dict[str, Any]) -> str:
+    """解释路由决策（向后兼容）"""
+    if not routing_metadata:
+        return "默认路由决策"
 
-    for query in test_queries:
-        query_type, metadata = route_query(query)
-        explanation = explain_routing(query_type, metadata)
-        print(f"查询: {query}")
-        print(f"路由: {query_type.value} - {explanation}")
-        print("-" * 50)
+    reason = routing_metadata.get("reason", "未知原因")
+    original_query = routing_metadata.get("original_query", "")
+    clean_query = routing_metadata.get("clean_query", "")
+
+    explanation = f"原因: {reason}"
+
+    if original_query and clean_query and original_query != clean_query:
+        explanation += f"\n原始查询: {original_query}"
+        explanation += f"\n清理后: {clean_query}"
+
+    return explanation
