@@ -114,6 +114,7 @@ async def handle_resume_with_answer(user_answer: str, session_id: str):
     global agent_core
     from orchestrator import get_session
     from session_manager import session_manager
+    from utils.telemetry import get_telemetry_logger, TelemetryEvent, TelemetryStage
     session = get_session(session_id)
 
     if not session.has_pending_ask():
