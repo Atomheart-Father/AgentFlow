@@ -706,6 +706,11 @@ class Orchestrator:
         try:
             logger.info(f"规划阶段 (第{result.plan_iterations}轮)")
 
+            # 检查是否是续跑任务，如果是则跳过重新规划
+            if user_query == "RESUME_TASK" and result.final_plan:
+                logger.info("检测到RESUME_TASK，跳过重新规划，直接使用现有计划")
+                return OrchestratorState.ACT
+
             # 创建计划
             plan = await self.planner.create_plan(user_query, context)
             result.final_plan = plan

@@ -562,8 +562,8 @@ class AgentCore:
                                 session.active_task.execution_state.set_artifact("ask_user_pending", None)
                                 print(f"[DEBUG] 设置用户答案到 {output_key}: {user_answer}，清除ask_user_pending状态")
 
-                        # 使用现有的active_task继续编排
-                        result = await self.orchestrator.orchestrate(user_query="", context=context, active_task=session.active_task)
+                        # 使用现有的active_task继续编排 - 使用resume标识符避免重新规划
+                        result = await self.orchestrator.orchestrate(user_query="RESUME_TASK", context=context, active_task=session.active_task)
                     else:
                         # 没有活跃任务，尝试重新规划并创建新的active_task
                         print(f"[DEBUG] 续跑场景没有找到active_task，重新规划")
