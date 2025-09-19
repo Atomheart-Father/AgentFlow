@@ -4,14 +4,15 @@ Executor模块 - 负责执行计划中的步骤
 """
 import asyncio
 import json
-from typing import Dict, Any, List, Optional, Union
+from typing import Dict, Any, List, Optional, Union, Set
 from datetime import datetime
+from pydantic import BaseModel, Field
 
 from llm_interface import create_llm_interface_with_keys
 from schemas.orchestrator import PlannerOutput, PlanStep, StepType, Plan
 from tool_registry import get_tools, execute_tool, ToolError
 from schemas.tool_result import StandardToolResult
-from telemetry import get_telemetry_logger, TelemetryStage, TelemetryEvent
+from utils.telemetry import get_telemetry_logger, TelemetryStage, TelemetryEvent
 from logger import get_logger
 
 logger = get_logger()
@@ -20,15 +21,25 @@ logger = get_logger()
 # AskUserException已移除，现在通过ask_user工具处理
 
 
-class ExecutionState:
-    """执行状态管理"""
+class ExecutionState(BaseModel):
+    """执行状态管理 - 使用Pydantic统一序列化"""
 
-    def __init__(self):
-        self.artifacts: Dict[str, Any] = {}  # 步骤产出
-        self.inputs: Dict[str, Any] = {}     # 用户输入
-        self.errors: List[str] = []          # 执行错误
-        self.completed_steps: List[str] = [] # 已完成的步骤
-        self.asked_questions: List[str] = [] # 已问过的问题
+    # 执行指针
+    cursor_index: int = Field(default=0, description="当前执行到的步骤索引")
+
+    # 完成状态
+    done_set: Set[str] = Field(default_factory=set, description="已完成的步骤step_id集合")
+
+    # 问答状态
+    asked_map: Dict[str, str] = Field(default_factory=dict, description="step_id -> ask_id映射")
+    answers: Dict[str, Any] = Field(default_factory=dict, description="step_id -> 用户答案映射")
+
+    # 遗留字段（保持兼容性）
+    artifacts: Dict[str, Any] = Field(default_factory=dict, description="步骤产出")
+    inputs: Dict[str, Any] = Field(default_factory=dict, description="用户输入")
+    errors: List[str] = Field(default_factory=list, description="执行错误")
+    completed_steps: List[str] = Field(default_factory=list, description="已完成的步骤ID（遗留）")
+    asked_questions: List[str] = Field(default_factory=list, description="已问过的问题（遗留）")
 
     def set_artifact(self, key: str, value: Any):
         """设置步骤产出"""
@@ -139,50 +150,56 @@ class Executor:
         # 初始化工具调用计数
         tool_call_count = 0
 
-        # 按依赖关系排序步骤
-        sorted_steps = self._topological_sort(plan.steps)
+        # 使用cursor_index作为执行指针
+        while state.cursor_index < len(plan.steps):
+            current_step = plan.steps[state.cursor_index]
 
-        logger.info(f"开始执行步骤，已完成的步骤: {state.completed_steps}")
-
-        for step in sorted_steps:
-            # 检查步骤是否已经完成，如果已完成则跳过
-            if step.id in state.completed_steps:
-                logger.info(f"步骤 {step.id} 已完成，跳过执行")
+            # 检查步骤是否已经完成（使用step_id）
+            if current_step.step_id in state.done_set:
+                logger.info(f"步骤 {current_step.id} (step_id: {current_step.step_id}) 已完成，跳过执行")
+                state.cursor_index += 1
                 continue
+
             # 检查工具调用预算
             if max_tool_calls is not None and tool_call_count >= max_tool_calls:
                 logger.warning(f"达到工具调用上限 {max_tool_calls}，停止执行")
                 break
 
             try:
-                logger.info(f"执行步骤: {step.id} ({step.type})")
-                step_tool_calls = await self._execute_step(step, state, plan)
+                logger.info(f"执行步骤: {current_step.id} ({current_step.type}) - 指针位置: {state.cursor_index}")
+                step_tool_calls = await self._execute_step(current_step, state, plan)
 
                 # 更新工具调用计数
                 tool_call_count += step_tool_calls
 
-                # 如果在步骤执行过程中产生了待询问用户的问题，则立即暂停执行，等待用户输入
+                # 如果产生了ask_user_pending，立即返回（不标记为完成）
                 if state.get_artifact("ask_user_pending"):
-                    logger.info("检测到ask_user_pending，暂停执行等待用户输入")
-                    # 即使暂停，也要标记ask_user步骤为完成，因为它已经成功执行了询问逻辑
-                    state.completed_steps.append(step.id)
+                    logger.info(f"步骤 {current_step.id} 产生ask_user_pending，暂停执行等待用户输入")
+                    # 记录ask_id映射
+                    ask_id = state.get_artifact("ask_user_pending").get("ask_id", "")
+                    if ask_id:
+                        state.asked_map[current_step.step_id] = ask_id
                     return state
 
-                # 标记步骤为完成（仅当未进入等待用户输入状态时）
-                state.completed_steps.append(step.id)
+                # 步骤执行成功，标记为完成并前进指针
+                state.done_set.add(current_step.step_id)
+                state.completed_steps.append(current_step.id)  # 保持遗留兼容性
+                state.cursor_index += 1
+                logger.info(f"步骤 {current_step.id} 执行完成，指针前进到: {state.cursor_index}")
 
             except Exception as e:
                 # 记录执行错误
-                error_msg = f"步骤 {step.id} 执行失败: {str(e)}"
+                error_msg = f"步骤 {current_step.id} 执行失败: {str(e)}"
                 logger.error(error_msg)
                 state.errors.append(error_msg)
+                state.cursor_index += 1  # 出错也前进指针，避免死循环
 
                 # 如果是关键步骤失败，可能需要停止执行
-                if step.retry == 0:
-                    logger.warning(f"步骤 {step.id} 重试次数已用完，停止执行")
+                if current_step.retry == 0:
+                    logger.warning(f"步骤 {current_step.id} 重试次数已用完，停止执行")
                     break
 
-        logger.info(f"计划执行完成，已完成 {len(state.completed_steps)}/{len(plan.steps)} 个步骤")
+        logger.info(f"计划执行完成，已完成 {len(state.done_set)}/{len(plan.steps)} 个步骤，指针位置: {state.cursor_index}")
         return state
 
     async def _execute_step(self, step: PlanStep, state: ExecutionState, plan: PlannerOutput) -> int:
@@ -480,24 +497,36 @@ class Executor:
         logger.info(f"写文件步骤 {step.id} 完成，输出到: {step.output_key}")
 
     async def _execute_ask_user(self, step: PlanStep, inputs: Dict[str, Any], state: ExecutionState):
-        """执行询问用户步骤 - 设置待询问状态"""
-        # 记录已经问过的问题，避免重复提问
-        if "question" in inputs:
-            question = inputs["question"]
-            if question not in state.asked_questions:
-                state.asked_questions.append(question)
-                logger.debug(f"记录已问问题: {question}")
+        """执行询问用户步骤 - 发问即返回，下一条续跑"""
+        question = inputs.get("question", "请提供更多信息")
 
-        # 设置ask_user_pending状态，让orchestrator知道需要等待用户输入
+        # 生成ask_id
+        import uuid
+        ask_id = f"ask_{int(asyncio.get_event_loop().time())}_{uuid.uuid4().hex[:8]}"
+
+        # 记录ask_id映射
+        state.asked_map[step.step_id] = ask_id
+
+        # 设置ask_user_pending状态（包含ask_id）
         ask_user_pending = {
-            "questions": [inputs.get("question", "请提供更多信息")],
-            "context": inputs.get("context", ""),
-            "step_id": step.id,
-            "output_key": step.output_key
+            "ask_id": ask_id,
+            "question": question,
+            "step_id": step.step_id,
+            "output_key": step.output_key,
+            "context": inputs.get("context", "")
         }
 
         state.set_artifact("ask_user_pending", ask_user_pending)
-        logger.info(f"设置ask_user_pending状态，等待用户回答问题: {inputs.get('question', '')}")
+        logger.info(f"设置ask_user_pending状态，ask_id: {ask_id}, 问题: {question}")
+
+        # Telemetry: 记录ask_user_open事件
+        from utils.telemetry import log_ask_user_open
+        log_ask_user_open(
+            session_id="",  # executor层没有session_id，需要从上层传递
+            ask_id=ask_id,
+            question=question,
+            step_id=step.step_id
+        )
 
     async def _execute_web_search(self, step: PlanStep, inputs: Dict[str, Any], state: ExecutionState):
         """执行网络搜索步骤"""

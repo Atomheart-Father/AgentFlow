@@ -141,15 +141,20 @@ class QueryRouter:
         elif query_length < 20:  # 短查询倾向于对话
             return RouteMode.CHAT, f"短查询({query_length}字符)倾向于对话"
         else:
-            # 灰区：默认使用orchestrate（更安全）
-            return RouteMode.ORCHESTRATE, f"灰区查询，默认使用编排模式(安全优先)"
+            # 灰区：使用AI二分类
+            try:
+                return self._advanced_route(query)
+            except Exception as e:
+                logger.warning(f"AI二分类失败: {e}, 使用默认编排模式")
+                return RouteMode.ORCHESTRATE, f"灰区查询，默认使用编排模式(安全优先)"
 
     def _advanced_route(self, query: str) -> Tuple[RouteMode, str]:
-        """高级路由（可选：使用小模型二分类）
-        这里可以集成一个轻量级模型来进行更准确的分类
+        """高级路由（使用小模型二分类）
+        对灰区查询使用轻量级模型进行二分类
         """
-        # TODO: 实现小模型二分类
-        # 目前先使用启发式
+        # 暂时使用启发式，避免asyncio.run()在已有循环中的问题
+        # TODO: 在合适的地方实现异步AI分类
+        logger.info("使用启发式路由（AI二分类暂未实现）")
         return self._heuristic_route(query)
 
     def route(self, query: str) -> Dict[str, Any]:

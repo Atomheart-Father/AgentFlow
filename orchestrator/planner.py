@@ -79,6 +79,13 @@ class Planner:
                 # 解析和验证计划（严格JSON模式）
                 validated_plan = validate_planner_output(response.content)
 
+                # 为每个step计算稳定ID
+                from schemas.plan import compute_step_id
+                for step in validated_plan.steps:
+                    step_dict = step.dict()
+                    step.step_id = compute_step_id(step_dict)
+                    logger.debug(f"步骤 {step.id} 的稳定ID: {step.step_id}")
+
                 # 检查规划质量
                 if len(validated_plan.steps) == 0:
                     # Telemetry: 空计划

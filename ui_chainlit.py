@@ -135,26 +135,25 @@ async def handle_resume_with_answer(user_answer: str, session_id: str):
     current_ask_id = cl.user_session.get("current_ask_id", "")
     if not session_manager.validate_ask_id_consistency(session, current_ask_id):
         # 记录session不匹配事件
-        telemetry_logger = get_telemetry_logger()
-        telemetry_logger.log_event(
-            stage=TelemetryStage.ASK_USER,
-            event=TelemetryEvent.ASK_USER_IGNORED,
-            context={
-            "reason": "ask_id_validation_failed",
-            "current_ask_id": current_ask_id,
-            "session_pending_ask": session.pending_ask.ask_id if session.pending_ask else None
-        })
+        from utils.telemetry import log_session_mismatch
+        expected_ask_id = session.pending_ask.ask_id if session.pending_ask else ""
+        log_session_mismatch(
+            session_id=session_id,
+            expected_session_id=session_id,
+            actual_session_id=session_id,
+            expected_ask_id=expected_ask_id,
+            actual_ask_id=current_ask_id
+        )
         await cl.Message(content=f"❌ AskID不匹配或状态异常，请重新开始任务", author="系统").send()
         return
 
     # 记录ask_user_resume事件
     if current_ask_id:
-        # 记录ask_user_resume事件
-        telemetry_logger = get_telemetry_logger()
-        telemetry_logger.log_event(
-            stage=TelemetryStage.ASK_USER,
-            event=TelemetryEvent.ASK_USER_IGNORED,
-            context={"ask_id": current_ask_id, "action": "resume"}
+        from utils.telemetry import log_ask_user_resume
+        log_ask_user_resume(
+            session_id=session_id,
+            ask_id=current_ask_id,
+            answer=user_answer
         )
 
     # 发送ask_user_close事件
@@ -310,7 +309,7 @@ async def handle_resume_with_answer(user_answer: str, session_id: str):
                 break
 
         # 完成流式输出
-        await assistant_msg.update()
+        # await assistant_msg.update()  # 注释掉，避免重复显示
 
         # 添加完成标记到侧栏
         completion_log = "✅ 任务继续完成"
@@ -354,7 +353,7 @@ async def handle_simple_chat(user_input: str, session_id: str):
                 await asyncio.sleep(0)  # 让事件循环有机会处理
 
         # 完成流式输出
-        await assistant_msg.update()
+        # await assistant_msg.update()  # 注释掉，避免重复显示
 
     except Exception as e:
         error_msg = await cl.Message(content=f"❌ 处理失败: {str(e)}", author="助手").send()
@@ -437,7 +436,7 @@ async def handle_complex_plan(user_input: str, session_id: str):
                 break
 
         # 完成流式输出
-        await assistant_msg.update()
+        # await assistant_msg.update()  # 注释掉，避免重复显示
 
         # 添加完成标记到侧栏
         completion_log = "✅ 处理完成"

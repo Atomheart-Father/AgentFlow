@@ -651,14 +651,28 @@ class AgentCore:
             print(f"[DEBUG] 检查ask_user状态 - status: {result.status}, pending_questions: {result.pending_questions}")
             if result.status == "ask_user" and result.pending_questions:
                 question = result.pending_questions[0]
-                ask_id = f"ask_{int(asyncio.get_event_loop().time())}"
-                print(f"[DEBUG] 发送 ask_user_open 事件: {question}")
-                telemetry_logger.log_event(
-                    stage=TelemetryStage.ASK_USER,
-                    event=TelemetryEvent.ASK_USER_IGNORED,
-                    context={"ask_id": ask_id, "question": question, "action": "open"}
+
+                # 从execution_state中获取ask_user_pending，提取正确的ask_id
+                ask_user_pending = None
+                if result.execution_state:
+                    ask_user_pending = result.execution_state.get_artifact("ask_user_pending")
+
+                if ask_user_pending and isinstance(ask_user_pending, dict):
+                    ask_id = ask_user_pending.get("ask_id", f"ask_{int(asyncio.get_event_loop().time())}")
+                    step_id = ask_user_pending.get("step_id", "")
+                else:
+                    ask_id = f"ask_{int(asyncio.get_event_loop().time())}"
+                    step_id = ""
+
+                print(f"[DEBUG] 发送 ask_user_open 事件: {question}, ask_id: {ask_id}")
+                from utils.telemetry import log_ask_user_open
+                log_ask_user_open(
+                    session_id=session_id,
+                    ask_id=ask_id,
+                    question=question,
+                    step_id=step_id
                 )
-                yield {"type": "ask_user_open", "payload": {"ask_id": ask_id, "question": question}}
+                yield {"type": "ask_user_open", "payload": {"ask_id": ask_id, "question": question, "step_id": step_id}}
                 return  # 等待用户输入，不要继续执行
 
             # 检查是否处于等待用户输入状态
