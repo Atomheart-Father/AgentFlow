@@ -565,8 +565,18 @@ class AgentCore:
                         # 使用现有的active_task继续编排
                         result = await self.orchestrator.orchestrate(user_query="", context=context, active_task=session.active_task)
                     else:
-                        # 没有活跃任务，重新规划
+                        # 没有活跃任务，尝试重新规划并创建新的active_task
+                        print(f"[DEBUG] 续跑场景没有找到active_task，重新规划")
                         result = await self.orchestrator.orchestrate(user_query="", context=context)
+
+                        # 确保重新规划后有active_task
+                        if result.final_plan or result.execution_state:
+                            if not session.active_task:
+                                from orchestrator.orchestrator import ActiveTask
+                                session.active_task = ActiveTask()
+                                session.active_task.plan = result.final_plan
+                                session.active_task.execution_state = result.execution_state
+                                print(f"[DEBUG] 续跑重新规划后创建active_task - session_id: {session_id}")
                 else:
                     result = await self.orchestrator.orchestrate(user_query="", context=context)
             else:
@@ -699,8 +709,8 @@ class AgentCore:
             # 使用编排器处理查询
             orchestrator_result = await self.orchestrator.orchestrate(user_query, context)
 
-            # 如果是ask_user状态，确保session中有active_task
-            if orchestrator_result.status == "ask_user" and context and "session_id" in context:
+            # 确保session中有active_task（无论是ask_user状态还是正常完成状态）
+            if context and "session_id" in context:
                 session_id = context["session_id"]
                 from orchestrator import get_session
                 session = get_session(session_id)
@@ -714,7 +724,18 @@ class AgentCore:
                     session.active_task.iteration_count = orchestrator_result.iteration_count
                     session.active_task.plan_iterations = orchestrator_result.plan_iterations
                     session.active_task.total_tool_calls = orchestrator_result.total_tool_calls
-                    print(f"[DEBUG] agent_core创建active_task - session_id: {session_id}, active_task: {session.active_task is not None}")
+                    print(f"[DEBUG] agent_core创建active_task - session_id: {session_id}, active_task: {session.active_task is not None}, status: {orchestrator_result.status}")
+
+                # 更新active_task状态（如果已存在）
+                else:
+                    if orchestrator_result.final_plan:
+                        session.active_task.plan = orchestrator_result.final_plan
+                    if orchestrator_result.execution_state:
+                        session.active_task.execution_state = orchestrator_result.execution_state
+                    session.active_task.iteration_count = orchestrator_result.iteration_count
+                    session.active_task.plan_iterations = orchestrator_result.plan_iterations
+                    session.active_task.total_tool_calls = orchestrator_result.total_tool_calls
+                    print(f"[DEBUG] agent_core更新active_task - session_id: {session_id}, status: {orchestrator_result.status}")
 
             # 检查是否处于ask_user状态
             if orchestrator_result.status == "ask_user" and orchestrator_result.execution_state:

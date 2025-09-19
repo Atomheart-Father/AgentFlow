@@ -564,30 +564,34 @@ class Orchestrator:
         finally:
             result.total_time = time.time() - start_time
 
-            # 保存结果到active_task（如果存在）
-            if active_task:
-                active_task.result = result
-                active_task.update_activity()
+            # 保存结果到active_task
+            if not active_task:
+                # 如果没有传入active_task，创建一个新的
+                active_task = ActiveTask()
+                logger.info(f"为session {session_id} 创建新的active_task")
 
-                # 确保active_task被保存到session中
-                if session_id in _sessions:
-                    session = _sessions[session_id]
-                    # 更新session中的active_task
-                    if result.final_plan:
-                        active_task.plan = result.final_plan
-                    if result.execution_state:
-                        active_task.execution_state = result.execution_state
-                    active_task.iteration_count = result.iteration_count
-                    active_task.plan_iterations = result.plan_iterations
-                    active_task.total_tool_calls = result.total_tool_calls
+            # 更新active_task状态
+            active_task.result = result
+            active_task.update_activity()
+            if result.final_plan:
+                active_task.plan = result.final_plan
+            if result.execution_state:
+                active_task.execution_state = result.execution_state
+            active_task.iteration_count = result.iteration_count
+            active_task.plan_iterations = result.plan_iterations
+            active_task.total_tool_calls = result.total_tool_calls
 
-                    session.active_task = active_task
-                    logger.info(f"已保存active_task到session {session_id}")
-                    print(f"[DEBUG] orchestrator保存active_task - session_id: {session_id}, active_task: {active_task is not None}")
-                    print(f"[DEBUG] 保存的session id: {id(session)}")
-                    print(f"[DEBUG] 保存的active_task id: {id(active_task)}")
-                    print(f"[DEBUG] 保存的plan: {active_task.plan is not None}")
-                    print(f"[DEBUG] 保存的execution_state: {active_task.execution_state is not None}")
+            # 确保active_task被保存到session中
+            if session_id in _sessions:
+                session = _sessions[session_id]
+                session.active_task = active_task
+                logger.info(f"已保存active_task到session {session_id}")
+                print(f"[DEBUG] orchestrator保存active_task - session_id: {session_id}, active_task: {active_task is not None}")
+                print(f"[DEBUG] 保存的session id: {id(session)}")
+                print(f"[DEBUG] 保存的active_task id: {id(active_task)}")
+                print(f"[DEBUG] 保存的plan: {active_task.plan is not None}")
+                print(f"[DEBUG] 保存的execution_state: {active_task.execution_state is not None}")
+                print(f"[DEBUG] 保存的execution_state pending: {active_task.execution_state.get_artifact('ask_user_pending') if active_task.execution_state else None}")
 
             # 结束备现身复盘会话
             final_result = {
