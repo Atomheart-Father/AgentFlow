@@ -30,9 +30,13 @@ async def on_chat_start():
     config = get_config()
     agent_core = create_agent_core_with_llm(use_m3=True)
 
-    # 创建会话ID
-    session_id = str(uuid.uuid4())
-    cl.user_session.set("session_id", session_id)
+    # 创建会话ID - 使用session管理器
+    import sys
+    import os
+    sys.path.append(os.path.dirname(__file__))
+    from session_manager import session_manager
+    from utils.telemetry import get_telemetry_logger, TelemetryEvent, TelemetryStage
+    session_id = session_manager.get_or_create_session_id(cl.user_session)
 
     # 初始化侧栏状态
     cl.user_session.set("sidebar_logs", [])
@@ -53,10 +57,16 @@ async def on_message(message: cl.Message):
         await cl.Message(content="❌ Agent 未初始化，请刷新页面重试").send()
         return
 
-    session_id = cl.user_session.get("session_id")
-    if not session_id:
-        await cl.Message(content="❌ 会话ID丢失，请刷新页面").send()
-        return
+    # 确保路径设置和导入
+    import sys
+    import os
+    if os.path.dirname(__file__) not in sys.path:
+        sys.path.append(os.path.dirname(__file__))
+
+    from session_manager import session_manager
+    from utils.telemetry import get_telemetry_logger, TelemetryEvent, TelemetryStage
+
+    session_id = session_manager.get_or_create_session_id(cl.user_session)
 
     # 立即显示用户输入
     user_msg = cl.Message(content=message.content, author="用户")
@@ -92,18 +102,22 @@ async def on_message(message: cl.Message):
     await routing_msg.send()
 
     if query_type == QueryType.SIMPLE_CHAT:
-        # 简单问答：直接用Chat模型
-        await handle_simple_chat(message.content, session_id)
+        # 简单问答：直接用快速Agent
+        await handle_simple_chat(routing_metadata.get("clean_query", message.content), session_id)
     else:
         # 复杂编排：走Planner→Executor→Judge
-        await handle_complex_plan(message.content, session_id)
+        await handle_complex_plan(routing_metadata.get("clean_query", message.content), session_id)
 
 
 async def handle_resume_with_answer(user_answer: str, session_id: str):
     """处理用户对pending_ask的回答 - 会话续跑"""
+    print(f"[DEBUG] UI进入续跑函数 - session_id='{session_id}', user_answer='{user_answer}'")
     global agent_core
     from orchestrator import get_session
+    from session_manager import session_manager
+    from utils.telemetry import get_telemetry_logger, TelemetryEvent, TelemetryStage
     session = get_session(session_id)
+    print(f"[DEBUG] UI获取session完成，检查是否有pending_ask: {session.has_pending_ask()}")
 
     if not session.has_pending_ask():
         await cl.Message(content="❌ 没有等待回答的问题").send()
@@ -119,9 +133,48 @@ async def handle_resume_with_answer(user_answer: str, session_id: str):
     # 记录用户回答到对话历史
     session.add_message("user", f"回答了问题: {user_answer}")
 
+    # 验证ask_id一致性
+    current_ask_id = cl.user_session.get("current_ask_id", "")
+    if not session_manager.validate_ask_id_consistency(session, current_ask_id):
+        # 记录session不匹配事件
+        from utils.telemetry import log_session_mismatch
+        expected_ask_id = session.pending_ask.ask_id if session.pending_ask else ""
+        log_session_mismatch(
+            session_id=session_id,
+            expected_session_id=session_id,
+            actual_session_id=session_id,
+            expected_ask_id=expected_ask_id,
+            actual_ask_id=current_ask_id
+        )
+        await cl.Message(content=f"❌ AskID不匹配或状态异常，请重新开始任务", author="系统").send()
+        return
+
+    # 记录ask_user_resume事件
+    if current_ask_id:
+        from utils.telemetry import log_ask_user_resume
+        # 获取step_id和active_task_id用于三元组日志
+        step_id = ""
+        active_task_id = ""
+        if session.pending_ask:
+            step_id = getattr(session.pending_ask, 'step_id', '')
+        log_ask_user_resume(
+            session_id=session_id,
+            ask_id=current_ask_id,
+            answer=user_answer,
+            step_id=step_id,
+            active_task_id=active_task_id
+        )
+
+    # 发送ask_user_close事件
+    if current_ask_id:
+        # 这里可以发送ask_user_close事件，但由于我们已经修改了协议，这里先跳过
+        pass
+
     # 清除pending状态
-    pending_ask = session.pending_ask
     session.clear_pending_ask()
+
+    # 清除前端状态
+    session_manager.cleanup_session_state(cl.user_session)
 
     try:
         # 调试信息：检查session状态
@@ -160,7 +213,7 @@ async def handle_resume_with_answer(user_answer: str, session_id: str):
                 return
 
         # 将用户答案设置到active_task的execution_state中
-        if session.active_task.execution_state:
+        if session.active_task and session.active_task.execution_state:
             # 查找ask_user_pending并设置答案
             ask_user_pending = session.active_task.execution_state.get_artifact("ask_user_pending")
             if ask_user_pending and isinstance(ask_user_pending, dict):
@@ -177,15 +230,29 @@ async def handle_resume_with_answer(user_answer: str, session_id: str):
                     print(f"[DEBUG]   {k}: {v}")
             else:
                 print(f"[DEBUG] ask_user_pending not found or not dict: {ask_user_pending}")
+
+                # 如果没有ask_user_pending，尝试从pending_ask中推断output_key
+                if session.pending_ask and hasattr(session.pending_ask, 'expects'):
+                    # 根据问题类型推断output_key
+                    question = session.pending_ask.question.lower()
+                    if "城市" in question or "city" in question:
+                        output_key = "user_location"
+                    elif "日期" in question or "时间" in question or "date" in question or "time" in question:
+                        output_key = "user_date"
+                    else:
+                        output_key = "user_answer"
+
+                    session.active_task.execution_state.set_artifact(output_key, user_answer)
+                    print(f"[DEBUG] 从问题推断output_key: {output_key} = {user_answer}")
         else:
-            print(f"[DEBUG] session.active_task.execution_state is None")
+            print(f"[DEBUG] session.active_task或execution_state is None")
 
         # 使用agent_core继续处理，传递包含active_task的上下文
         context = {
             "session_id": session_id,
             "user_answer": user_answer,
             "resume_task": True,  # 标记这是续跑场景
-            "pending_question": pending_ask.question if pending_ask else None
+            "pending_question": session.pending_ask.question if session.pending_ask else None
         }
 
         # 创建新的assistant消息用于流式输出
@@ -195,22 +262,28 @@ async def handle_resume_with_answer(user_answer: str, session_id: str):
         sidebar_logs = []
         # 累积assistant_content
         full_content = ""
+        # token计数用于调试
+        token_count = 0
 
         # 使用agent_core的流式处理方法继续执行（传递session的active_task）
         async for event in agent_core._process_with_m3_stream("", context=context):
             event_type = event.get("type", "")
-            message = event.get("message", "")
+            payload = event.get("payload", {})
 
             if event_type == "assistant_content":
-                # 真·流式：逐token输出
-                content_delta = event.get("content", "")
+                # 真·流式：逐token输出到聊天区域
+                content_delta = payload.get("delta", "")
                 if content_delta:
                     await assistant_msg.stream_token(content_delta)
                     full_content += content_delta  # 累积内容
+                    token_count += 1  # 计数token
+                    if token_count % 10 == 0:  # 每10个token打印一次日志
+                        print(f"[DEBUG] UI流式token计数: {token_count}")
                     await asyncio.sleep(0)  # 让事件循环flush
 
             elif event_type in ["status", "tool_trace", "debug"]:
                 # 事件分流：进入侧栏
+                message = payload.get("message", "")
                 if message:
                     log_entry = f"🔄 {message}"
                     sidebar_logs.append(log_entry)
@@ -221,26 +294,46 @@ async def handle_resume_with_answer(user_answer: str, session_id: str):
                         author="系统日志"
                     ).send()
 
-            elif event_type == "ask_user":
+            elif event_type == "ask_user_open":
                 # 如果又有新问题，设置新的pending状态
-                question = event.get("question", "请提供更多信息")
+                ask_id = payload.get("ask_id", "")
+                question = payload.get("question", "请提供更多信息")
+                print(f"[DEBUG] UI收到ask_user_open事件 - ask_id='{ask_id}', question='{question}'")
+
+                # 发送问句消息给用户
                 ask_msg = await cl.Message(
                     content=f"🤔 {question}\n\n请直接回复，我将继续处理。",
                     author="助手"
                 ).send()
-                session.set_pending_ask(question, "answer")
+                print(f"[DEBUG] UI发送问句消息完成")
+
+                # 设置pending状态
+                session.set_pending_ask(question, ask_id)
                 cl.user_session.set("waiting_for_user_input", True)
+                cl.user_session.set("current_ask_id", ask_id)
+
+                print(f"[DEBUG] UI设置pending状态完成，准备return结束本轮")
                 return
+
+            elif event_type == "final_answer":
+                # 最终答案
+                answer = payload.get("answer", "")
+                if answer:
+                    await assistant_msg.stream_token(answer)
+                    full_content += answer
 
             elif event_type == "error":
                 # 错误处理
-                error_msg = event.get("message", "未知错误")
+                error_code = payload.get("code", "UNKNOWN")
+                error_msg = payload.get("message", "未知错误")
                 await assistant_msg.stream_token(f"\n\n❌ {error_msg}")
                 full_content += f"\n\n❌ {error_msg}"  # 累积错误内容
                 break
 
         # 完成流式输出
+        # 完成流式输出 - 最后一次update()确保消息完成状态
         await assistant_msg.update()
+        print(f"[DEBUG] UI流式输出完成，总token数: {token_count}")
 
         # 添加完成标记到侧栏
         completion_log = "✅ 任务继续完成"
@@ -284,6 +377,7 @@ async def handle_simple_chat(user_input: str, session_id: str):
                 await asyncio.sleep(0)  # 让事件循环有机会处理
 
         # 完成流式输出
+        # 完成流式输出 - 最后一次update()确保消息完成状态
         await assistant_msg.update()
 
     except Exception as e:
@@ -306,18 +400,22 @@ async def handle_complex_plan(user_input: str, session_id: str):
         # 正确处理异步生成器 - agent_core._process_with_m3_stream是async def
         async for event in agent_core._process_with_m3_stream(user_input, context={"session_id": session_id}):
             event_type = event.get("type", "")
-            message = event.get("message", "")
+            payload = event.get("payload", {})
 
             if event_type == "assistant_content":
-                # 真·流式：逐token输出
-                content_delta = event.get("content", "")
+                # 真·流式：逐token输出到聊天区域
+                content_delta = payload.get("delta", "")
                 if content_delta:
                     await assistant_msg.stream_token(content_delta)
                     full_content += content_delta  # 累积内容
+                    token_count += 1  # 计数token
+                    if token_count % 10 == 0:  # 每10个token打印一次日志
+                        print(f"[DEBUG] UI流式token计数: {token_count}")
                     await asyncio.sleep(0)  # 让事件循环flush
 
             elif event_type in ["status", "tool_trace", "debug"]:
                 # 事件分流：进入侧栏
+                message = payload.get("message", "")
                 if message:
                     log_entry = f"🔄 {message}"
                     sidebar_logs.append(log_entry)
@@ -328,10 +426,10 @@ async def handle_complex_plan(user_input: str, session_id: str):
                         author="系统日志"
                     ).send()
 
-            elif event_type == "ask_user":
+            elif event_type == "ask_user_open":
                 # AskUser优化：发问即返回，下条消息resume
-                question = event.get("question", "请提供更多信息")
-                context_info = event.get("context", "")
+                ask_id = payload.get("ask_id", "")
+                question = payload.get("question", "请提供更多信息")
 
                 # 显示问题并设置等待状态
                 ask_msg = await cl.Message(
@@ -339,25 +437,36 @@ async def handle_complex_plan(user_input: str, session_id: str):
                     author="助手"
                 ).send()
 
-                # 设置前端等待状态
+                # 设置前端等待状态和ask_id
                 cl.user_session.set("waiting_for_user_input", True)
+                cl.user_session.set("current_ask_id", ask_id)
 
                 # 设置后端pending_ask状态
                 session = get_session(session_id)
-                session.set_pending_ask(question, "answer")
+                session.set_pending_ask(question, ask_id)
 
                 # 立即返回，不继续处理（避免超时）
                 return
 
+            elif event_type == "final_answer":
+                # 最终答案
+                answer = payload.get("answer", "")
+                if answer:
+                    await assistant_msg.stream_token(answer)
+                    full_content += answer
+
             elif event_type == "error":
                 # 错误处理
-                error_msg = event.get("message", "未知错误")
+                error_code = payload.get("code", "UNKNOWN")
+                error_msg = payload.get("message", "未知错误")
                 await assistant_msg.stream_token(f"\n\n❌ {error_msg}")
                 full_content += f"\n\n❌ {error_msg}"  # 累积错误内容
                 break
 
         # 完成流式输出
+        # 完成流式输出 - 最后一次update()确保消息完成状态
         await assistant_msg.update()
+        print(f"[DEBUG] UI流式输出完成，总token数: {token_count}")
 
         # 添加完成标记到侧栏
         completion_log = "✅ 处理完成"

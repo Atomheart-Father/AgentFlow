@@ -5,7 +5,7 @@ Telemetry v1 模块
 import json
 import time
 import uuid
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List
 from pathlib import Path
 from enum import Enum
 
@@ -17,6 +17,9 @@ logger = get_logger()
 class TelemetryEvent(Enum):
     """遥测事件类型"""
     ASK_USER_IGNORED = "ASK_USER_IGNORED"      # 用户忽略活跃任务，开始新任务
+    ASK_USER_OPEN = "ASK_USER_OPEN"            # AskUser问题打开
+    ASK_USER_RESUME = "ASK_USER_RESUME"        # 用户回答AskUser问题
+    SESSION_MISMATCH = "SESSION_MISMATCH"       # Session不匹配
     PLANNER_NON_JSON = "PLANNER_NON_JSON"     # Planner JSON 解析失败
     EXEC_TOOL_FAIL = "EXEC_TOOL_FAIL"          # 工具执行失败
     BUDGET_EXCEEDED = "BUDGET_EXCEEDED"        # 预算超限
@@ -265,3 +268,52 @@ def log_write_out_of_sandbox(**kwargs) -> str:
     """记录 WRITE_OUT_OF_SANDBOX 事件"""
     logger = get_telemetry_logger()
     return logger.log_write_out_of_sandbox(**kwargs)
+
+
+def log_ask_user_open(session_id: str, ask_id: str, question: str, step_id: str = "", active_task_id: str = "") -> str:
+    """记录 ASK_USER_OPEN 事件"""
+    logger = get_telemetry_logger()
+    return logger.log_event(
+        stage=TelemetryStage.ASK_USER,
+        event=TelemetryEvent.ASK_USER_OPEN,
+        context={
+            "session_id": session_id,
+            "active_task_id": active_task_id,
+            "ask_id": ask_id,
+            "step_id": step_id,
+            "question": question
+        }
+    )
+
+
+def log_ask_user_resume(session_id: str, ask_id: str, answer: str, latency_ms: int = 0, step_id: str = "", active_task_id: str = "") -> str:
+    """记录 ASK_USER_RESUME 事件"""
+    logger = get_telemetry_logger()
+    return logger.log_event(
+        stage=TelemetryStage.ASK_USER,
+        event=TelemetryEvent.ASK_USER_RESUME,
+        context={
+            "session_id": session_id,
+            "active_task_id": active_task_id,
+            "ask_id": ask_id,
+            "step_id": step_id,
+            "answer_len": len(answer),
+            "latency_ms": latency_ms
+        }
+    )
+
+
+def log_session_mismatch(session_id: str, expected_session_id: str, actual_session_id: str,
+                        expected_ask_id: str = "", actual_ask_id: str = "") -> str:
+    """记录 SESSION_MISMATCH 事件"""
+    logger = get_telemetry_logger()
+    return logger.log_event(
+        stage=TelemetryStage.ASK_USER,
+        event=TelemetryEvent.SESSION_MISMATCH,
+        context={
+            "expected_session_id": expected_session_id,
+            "actual_session_id": actual_session_id,
+            "expected_ask_id": expected_ask_id,
+            "actual_ask_id": actual_ask_id
+        }
+    )

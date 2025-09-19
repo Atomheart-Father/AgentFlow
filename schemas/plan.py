@@ -2,6 +2,8 @@
 Plan结构验证和定义
 使用Pydantic进行JSON Schema校验
 """
+import hashlib
+import json
 from typing import Dict, Any, List, Optional, Union
 from pydantic import BaseModel, Field, validator
 from enum import Enum
@@ -23,6 +25,7 @@ class StepType(str, Enum):
 class PlanStep(BaseModel):
     """计划步骤模型"""
     id: str = Field(..., description="步骤唯一标识符")
+    step_id: str = Field("", description="步骤稳定ID，用于执行指针比对")
     type: StepType = Field(..., description="步骤类型")
     tool: Optional[str] = Field(None, description="工具名称（当type=tool_call时必填）")
     inputs: Dict[str, Any] = Field(default_factory=dict, description="输入参数")
@@ -71,6 +74,54 @@ class Plan(BaseModel):
 class PlanValidationError(Exception):
     """计划验证错误"""
     pass
+
+
+def compute_step_id(step_dict: Dict[str, Any]) -> str:
+    """
+    计算步骤的稳定ID
+    用于执行指针比对，防止续跑时重复执行
+
+    Args:
+        step_dict: 步骤字典
+
+    Returns:
+        str: 16位十六进制稳定ID
+    """
+    # 提取用于计算签名的关键字段（只包含结构信息，不包含运行时值）
+    signature_data = {
+        "type": step_dict.get("type", ""),
+        "tool": step_dict.get("tool", ""),
+        "output_key": step_dict.get("output_key", ""),
+        # 注意：不包含expect（自然语言描述）和运行时参数值，以确保ID稳定
+    }
+
+    # 对于tool_call，包含参数schema签名
+    if step_dict.get("type") == "tool_call":
+        inputs = step_dict.get("inputs", {})
+        # 只包含schema结构，不包含运行时值
+        signature_data["inputs_schema"] = {k: type(v).__name__ for k, v in inputs.items()}
+
+    # 对于ask_user，只包含结构信息（目标写入键和问题类型），不包含原始文本
+    if step_dict.get("type") == "ask_user":
+        question = step_dict.get("inputs", {}).get("question", "")
+        # 提取问题模式：城市/日期/地点等关键词（只用于分类，不签原始文本）
+        if any(word in question.lower() for word in ["城市", "city", "地点", "location"]):
+            signature_data["question_type"] = "location"
+        elif any(word in question.lower() for word in ["日期", "时间", "date", "time", "when"]):
+            signature_data["question_type"] = "datetime"
+        else:
+            signature_data["question_type"] = "general"
+
+        # 包含目标写入键（决定答案写到execution_state的哪个artifact）
+        output_key = step_dict.get("output_key", "")
+        if output_key:
+            signature_data["target_key"] = output_key
+
+    # 计算SHA1哈希，取前16位
+    signature_str = json.dumps(signature_data, sort_keys=True, separators=(',', ':'))
+    step_id = hashlib.sha1(signature_str.encode('utf-8')).hexdigest()[:16]
+
+    return step_id
 
 
 def validate_plan(plan_data: Union[Dict[str, Any], str]) -> Plan:

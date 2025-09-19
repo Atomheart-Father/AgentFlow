@@ -11,6 +11,11 @@ from llm_interface import get_llm_interface, LLMResponse
 from config import get_config
 from logger import get_logger
 from tool_registry import get_tools, execute_tool, ToolError, to_openai_tools
+# 导入telemetry模块
+import sys
+import os
+sys.path.append(os.path.dirname(__file__))
+from utils.telemetry import get_telemetry_logger, TelemetryEvent, TelemetryStage
 
 logger = get_logger()
 
@@ -529,8 +534,18 @@ class AgentCore:
 
     async def _process_with_m3_stream(self, user_query: str, context: Optional[Dict[str, Any]] = None):
         """使用M3编排器处理查询（真·流式：assistant_content进聊天气泡，其他事件进状态栏）"""
+        session_id = context.get("session_id", "unknown") if context else "unknown"
+
+        # 开始telemetry监控
+        telemetry_logger = get_telemetry_logger()
+
         if not hasattr(self, 'orchestrator') or not self.orchestrator:
-            yield {"type": "error", "message": "M3编排器未初始化"}
+            telemetry_logger.log_event(
+                stage=TelemetryStage.ACT,
+                event=TelemetryEvent.EXEC_TOOL_FAIL,
+                context={"error": "M3编排器未初始化"}
+            )
+            yield {"type": "error", "payload": {"code": "INIT_FAILED", "message": "M3编排器未初始化"}}
             return
 
         try:
@@ -540,7 +555,7 @@ class AgentCore:
             if is_resume:
                 # 续跑场景：继续执行已有的任务
                 print("[DEBUG] 检测到续跑场景，开始继续执行任务")
-                yield {"type": "status", "message": "正在继续执行任务"}
+                yield {"type": "status", "payload": {"message": "正在继续执行任务"}}
 
                 session_id = context.get("session_id")
                 user_answer = context.get("user_answer")
@@ -561,9 +576,41 @@ class AgentCore:
                                 # 清除ask_user_pending状态，防止重复询问
                                 session.active_task.execution_state.set_artifact("ask_user_pending", None)
                                 print(f"[DEBUG] 设置用户答案到 {output_key}: {user_answer}，清除ask_user_pending状态")
+                            else:
+                                # 如果ask_user_pending不存在，尝试从pending_ask中推断
+                                if session.pending_ask and hasattr(session.pending_ask, 'expects'):
+                                    # 根据问题类型推断output_key
+                                    question = session.pending_ask.question.lower()
+                                    if "城市" in question or "city" in question:
+                                        output_key = "user_location"
+                                    elif "日期" in question or "时间" in question or "date" in question or "time" in question:
+                                        output_key = "user_date"
+                                    else:
+                                        output_key = "user_answer"
+
+                                    session.active_task.execution_state.set_artifact(output_key, user_answer)
+                                    print(f"[DEBUG] 从问题推断output_key: {output_key} = {user_answer}")
+                                else:
+                                    # 默认设置到user_answer
+                                    session.active_task.execution_state.set_artifact("user_answer", user_answer)
+                                    print(f"[DEBUG] 默认设置用户答案到 user_answer: {user_answer}")
 
                         # 使用现有的active_task继续编排 - 使用resume标识符避免重新规划
-                        result = await self.orchestrator.orchestrate(user_query="RESUME_TASK", context=context, active_task=session.active_task)
+                        # 将execution_state转换为字典格式以确保正确恢复
+                        if hasattr(session.active_task, 'execution_state') and session.active_task.execution_state:
+                            # 创建字典格式的execution_state副本
+                            execution_state_dict = {
+                                "artifacts": dict(session.active_task.execution_state.artifacts),
+                                "errors": list(session.active_task.execution_state.errors),
+                                "completed_steps": list(session.active_task.execution_state.completed_steps),
+                                "asked_questions": list(session.active_task.execution_state.asked_questions)
+                            }
+                            # 临时将execution_state设置为字典格式
+                            session.active_task.execution_state = execution_state_dict
+                            result = await self.orchestrator.orchestrate(user_query="RESUME_TASK", context=context, active_task=session.active_task)
+                            # 重要：不要恢复原始execution_state，使用orchestrator返回的结果
+                        else:
+                            result = await self.orchestrator.orchestrate(user_query="RESUME_TASK", context=context, active_task=session.active_task)
                     else:
                         # 没有活跃任务，尝试重新规划并创建新的active_task
                         print(f"[DEBUG] 续跑场景没有找到active_task，重新规划")
@@ -582,9 +629,9 @@ class AgentCore:
             else:
                 # 正常规划场景
                 print("[DEBUG] 发送状态事件: 正在规划任务")
-                yield {"type": "status", "message": "正在规划任务"}
+                yield {"type": "status", "payload": {"message": "正在规划任务"}}
 
-                # 模拟规划过程的思维链
+                # 模拟规划过程的思维链 - 使用统一事件协议
                 planning_steps = [
                     "分析用户查询意图...",
                     "制定执行计划...",
@@ -594,51 +641,85 @@ class AgentCore:
 
                 for step in planning_steps:
                     print(f"[DEBUG] 发送思维链: {step}")
-                    yield {"type": "assistant_content", "content": step + " "}
+                    yield {"type": "assistant_content", "payload": {"delta": step + " "}}
                     await asyncio.sleep(0.1)
 
                 # 执行编排
                 result = await self.orchestrator.orchestrate(user_query=user_query, context=context)
 
-            # 检查是否需要用户输入
+            # 检查是否需要用户输入 - 使用统一事件协议
             print(f"[DEBUG] 检查ask_user状态 - status: {result.status}, pending_questions: {result.pending_questions}")
             if result.status == "ask_user" and result.pending_questions:
                 question = result.pending_questions[0]
-                print(f"[DEBUG] 发送 ask_user 事件: {question}")
-                yield {"type": "ask_user", "question": question, "context": "需要用户信息"}
+
+                # 从execution_state中获取ask_user_pending，提取正确的ask_id
+                ask_user_pending = None
+                if result.execution_state:
+                    ask_user_pending = result.execution_state.get_artifact("ask_user_pending")
+
+                if ask_user_pending and isinstance(ask_user_pending, dict):
+                    ask_id = ask_user_pending.get("ask_id", f"ask_{int(asyncio.get_event_loop().time())}")
+                    step_id = ask_user_pending.get("step_id", "")
+                else:
+                    ask_id = f"ask_{int(asyncio.get_event_loop().time())}"
+                    step_id = ""
+
+                print(f"[DEBUG] 后端触发ask_user - 准备yield ask_user_open事件: question='{question}', ask_id='{ask_id}', step_id='{step_id}'")
+                from utils.telemetry import log_ask_user_open
+                # 获取active_task_id用于三元组日志
+                active_task_id = ""
+                if hasattr(result, 'execution_state') and result.execution_state:
+                    # 这里可以从execution_state中获取active_task信息
+                    pass
+                log_ask_user_open(
+                    session_id=session_id,
+                    ask_id=ask_id,
+                    question=question,
+                    step_id=step_id,
+                    active_task_id=active_task_id
+                )
+                print(f"[DEBUG] 后端yield ask_user_open事件完成，准备return结束本轮")
+                yield {"type": "ask_user_open", "payload": {"ask_id": ask_id, "question": question, "step_id": step_id}}
+                print(f"[DEBUG] 后端ask_user处理完成，return结束当前轮次")
                 return  # 等待用户输入，不要继续执行
 
             # 检查是否处于等待用户输入状态
             if result.status == "waiting_for_user" and result.pending_questions:
                 question = result.pending_questions[0]
-                print(f"[DEBUG] 发送 ask_user 事件 (waiting状态): {question}")
-                yield {"type": "ask_user", "question": question, "context": "需要用户信息"}
+                ask_id = f"ask_{int(asyncio.get_event_loop().time())}"
+                print(f"[DEBUG] 发送 ask_user_open 事件 (waiting状态): {question}")
+                telemetry_logger.log_event(
+                    stage=TelemetryStage.ASK_USER,
+                    event=TelemetryEvent.ASK_USER_IGNORED,
+                    context={"ask_id": ask_id, "question": question, "action": "open"}
+                )
+                yield {"type": "ask_user_open", "payload": {"ask_id": ask_id, "question": question}}
                 return  # 等待用户输入，不要继续执行
 
             # 状态：开始执行
             print("[DEBUG] 发送状态事件: 正在执行任务")
-            yield {"type": "status", "message": "正在执行任务"}
+            yield {"type": "status", "payload": {"message": "正在执行任务"}}
 
             # 模拟执行过程的思维链
             if result.final_plan and result.final_plan.steps:
                 for i, step in enumerate(result.final_plan.steps, 1):
                     step_type_str = step.type.value if hasattr(step.type, 'value') else str(step.type)
                     print(f"[DEBUG] 发送工具轨迹: 执行步骤 {i}: {step_type_str}")
-                    yield {"type": "tool_trace", "message": f"执行步骤 {i}: {step_type_str}"}
+                    yield {"type": "tool_trace", "payload": {"tool": step.tool or "unknown", "action": f"执行步骤 {i}", "result": step_type_str}}
 
                     # 根据步骤类型显示不同的执行信息
                     if step.type == "tool_call" and hasattr(step, 'tool') and step.tool:
                         print(f"[DEBUG] 发送工具调用: 调用工具 {step.tool}")
-                        yield {"type": "assistant_content", "content": f"\n调用工具 {step.tool}... "}
+                        yield {"type": "assistant_content", "payload": {"delta": f"\n调用工具 {step.tool}... "}}
                     elif step.type == "web_search":
                         print(f"[DEBUG] 发送网络搜索: 搜索 {step.inputs.get('query', '')}")
-                        yield {"type": "assistant_content", "content": f"\n执行网络搜索... "}
+                        yield {"type": "assistant_content", "payload": {"delta": f"\n执行网络搜索... "}}
                     elif step.type == "ask_user":
                         print(f"[DEBUG] 发送用户询问: {step.inputs.get('question', '')}")
-                        yield {"type": "assistant_content", "content": f"\n需要用户信息... "}
+                        yield {"type": "assistant_content", "payload": {"delta": f"\n需要用户信息... "}}
                     elif step.type == "summarize":
                         print(f"[DEBUG] 发送数据汇总: {step.expect}")
-                        yield {"type": "assistant_content", "content": f"\n汇总分析数据... "}
+                        yield {"type": "assistant_content", "payload": {"delta": f"\n汇总分析数据... "}}
 
                     await asyncio.sleep(0.1)
 
@@ -682,15 +763,23 @@ class AgentCore:
             # 真·流式输出最终内容
             if final_content:
                 print(f"[DEBUG] 发送最终内容: {final_content[:100]}...")
-                yield {"type": "assistant_content", "content": final_content}
+                yield {"type": "final_answer", "payload": {"answer": final_content}}
 
             # 状态：处理完成
             print("[DEBUG] 发送状态事件: 处理完成")
-            yield {"type": "status", "message": "处理完成"}
+            yield {"type": "status", "payload": {"message": "处理完成"}}
 
         except Exception as e:
             logger.error(f"M3流式处理失败: {e}")
-            yield {"type": "error", "message": f"处理失败: {str(e)}"}
+            telemetry_logger.log_event(
+                stage=TelemetryStage.ACT,
+                event=TelemetryEvent.EXEC_TOOL_FAIL,
+                context={"error": str(e), "stage": "stream_processing"}
+            )
+            yield {"type": "error", "payload": {"code": "PROCESS_FAILED", "message": f"处理失败: {str(e)}"}}
+        finally:
+            # 处理完成
+            pass
 
     async def _process_with_m3(self, user_query: str, context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """

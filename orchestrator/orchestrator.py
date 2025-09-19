@@ -124,11 +124,19 @@ class SessionState:
 
         return "\n".join(context_parts)
 
-    def set_pending_ask(self, question: str, expects: str):
+    def set_pending_ask(self, question: str, expects_or_ask_id: str):
         """设置挂起的问题"""
-        ask_id = str(uuid.uuid4())
+        # 如果expects_or_ask_id看起来像ask_id（以ask_开头），就直接使用
+        if expects_or_ask_id.startswith("ask_"):
+            ask_id = expects_or_ask_id
+            expects = "answer"
+        else:
+            # 否则生成新的ask_id
+            ask_id = str(uuid.uuid4())
+            expects = expects_or_ask_id
+
         self.pending_ask = PendingAsk(ask_id, question, expects)
-        logger.info(f"设置挂起问题: {question} (期望: {expects})")
+        logger.info(f"设置挂起问题: {question} (ask_id: {ask_id}, 期望: {expects})")
 
     def clear_pending_ask(self):
         """清除挂起的问题"""
@@ -555,7 +563,16 @@ class Orchestrator:
                                 result.pending_questions = questions
                                 logger.info(f"设置pending_questions: {questions}")
 
-                    # pending_ask会在UI层通过session状态管理
+                                # 同时设置session的pending_ask（用于UI层的状态管理）
+                                session_id = context.get("session_id") if context else None
+                                if session_id:
+                                    from orchestrator import get_session
+                                    session = get_session(session_id)
+                                    # 生成ask_id并设置pending_ask
+                                    ask_id = ask_user_pending.get("step_id", f"ask_{int(time.time())}")
+                                    session.set_pending_ask(questions[0], ask_id)
+                                    logger.info(f"设置session pending_ask: {questions[0]} (ask_id: {ask_id})")
+
                     break
 
                 self.post_mortem_logger.log_phase_end(current_state.value, "completed")
@@ -724,6 +741,7 @@ class Orchestrator:
             if user_query == "RESUME_TASK" and result.final_plan:
                 logger.info("检测到RESUME_TASK，跳过重新规划，直接使用现有计划")
                 return OrchestratorState.ACT
+
 
             # 创建计划
             plan = await self.planner.create_plan(user_query, context)
