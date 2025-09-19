@@ -208,7 +208,8 @@ class OrchestratorResult:
             "execution_state": {
                 "artifacts": self.execution_state.artifacts if self.execution_state else {},
                 "errors": self.execution_state.errors if self.execution_state else [],
-                "completed_steps": self.execution_state.completed_steps if self.execution_state else []
+                "completed_steps": self.execution_state.completed_steps if self.execution_state else [],
+                "asked_questions": self.execution_state.asked_questions if self.execution_state else []
             } if self.execution_state else None,
             "judge_history": [jr.dict() for jr in self.judge_history],
             "iteration_count": self.iteration_count,
@@ -431,7 +432,20 @@ class Orchestrator:
         if active_task:
             # 从现有任务恢复状态
             result.final_plan = active_task.plan
-            result.execution_state = active_task.execution_state
+
+            # 处理execution_state的反序列化
+            if isinstance(active_task.execution_state, dict):
+                # 从字典恢复ExecutionState
+                execution_state = ExecutionState()
+                execution_state.artifacts = active_task.execution_state.get("artifacts", {})
+                execution_state.errors = active_task.execution_state.get("errors", [])
+                execution_state.completed_steps = active_task.execution_state.get("completed_steps", [])
+                execution_state.asked_questions = active_task.execution_state.get("asked_questions", [])
+                result.execution_state = execution_state
+                logger.info(f"从字典恢复execution_state，已完成的步骤: {execution_state.completed_steps}, 已问问题: {execution_state.asked_questions}")
+            else:
+                result.execution_state = active_task.execution_state
+
             result.iteration_count = active_task.iteration_count
             result.plan_iterations = active_task.plan_iterations
             result.total_tool_calls = active_task.total_tool_calls

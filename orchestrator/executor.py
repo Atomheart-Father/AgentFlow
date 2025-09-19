@@ -142,7 +142,13 @@ class Executor:
         # 按依赖关系排序步骤
         sorted_steps = self._topological_sort(plan.steps)
 
+        logger.info(f"开始执行步骤，已完成的步骤: {state.completed_steps}")
+
         for step in sorted_steps:
+            # 检查步骤是否已经完成，如果已完成则跳过
+            if step.id in state.completed_steps:
+                logger.info(f"步骤 {step.id} 已完成，跳过执行")
+                continue
             # 检查工具调用预算
             if max_tool_calls is not None and tool_call_count >= max_tool_calls:
                 logger.warning(f"达到工具调用上限 {max_tool_calls}，停止执行")
