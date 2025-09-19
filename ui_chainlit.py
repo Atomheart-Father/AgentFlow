@@ -32,6 +32,7 @@ async def on_chat_start():
 
     # 创建会话ID - 使用session管理器
     from session_manager import session_manager
+    from telemetry import telemetry, TelemetryEvent
     session_id = session_manager.get_or_create_session_id(cl.user_session)
 
     # 初始化侧栏状态
@@ -119,8 +120,17 @@ async def handle_resume_with_answer(user_answer: str, session_id: str):
     # 验证ask_id一致性
     current_ask_id = cl.user_session.get("current_ask_id", "")
     if not session_manager.validate_ask_id_consistency(session, current_ask_id):
+        telemetry.log_event(TelemetryEvent.SESSION_MISMATCH, session_id, payload={
+            "reason": "ask_id_validation_failed",
+            "current_ask_id": current_ask_id,
+            "session_pending_ask": session.pending_ask.ask_id if session.pending_ask else None
+        })
         await cl.Message(content=f"❌ AskID不匹配或状态异常，请重新开始任务", author="系统").send()
         return
+
+    # 记录ask_user_resume事件
+    if current_ask_id:
+        telemetry.log_ask_user_event(session_id, current_ask_id, "", "resume")
 
     # 发送ask_user_close事件
     if current_ask_id:
@@ -231,6 +241,7 @@ async def handle_resume_with_answer(user_answer: str, session_id: str):
                 if content_delta:
                     await assistant_msg.stream_token(content_delta)
                     full_content += content_delta  # 累积内容
+                    telemetry.record_stream_token(len(content_delta))  # 记录token计数
                     await asyncio.sleep(0)  # 让事件循环flush
 
             elif event_type in ["status", "tool_trace", "debug"]:
@@ -349,6 +360,7 @@ async def handle_complex_plan(user_input: str, session_id: str):
                 if content_delta:
                     await assistant_msg.stream_token(content_delta)
                     full_content += content_delta  # 累积内容
+                    telemetry.record_stream_token(len(content_delta))  # 记录token计数
                     await asyncio.sleep(0)  # 让事件循环flush
 
             elif event_type in ["status", "tool_trace", "debug"]:

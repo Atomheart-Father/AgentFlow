@@ -11,6 +11,7 @@ from llm_interface import get_llm_interface, LLMResponse
 from config import get_config
 from logger import get_logger
 from tool_registry import get_tools, execute_tool, ToolError, to_openai_tools
+from telemetry import telemetry, TelemetryEvent
 
 logger = get_logger()
 
@@ -529,8 +530,15 @@ class AgentCore:
 
     async def _process_with_m3_stream(self, user_query: str, context: Optional[Dict[str, Any]] = None):
         """使用M3编排器处理查询（真·流式：assistant_content进聊天气泡，其他事件进状态栏）"""
+        session_id = context.get("session_id", "unknown") if context else "unknown"
+
+        # 开始telemetry监控
+        telemetry.start_stream_monitoring(session_id)
+
         if not hasattr(self, 'orchestrator') or not self.orchestrator:
+            telemetry.log_error("INIT_FAILED", session_id, RuntimeError("M3编排器未初始化"))
             yield {"type": "error", "payload": {"code": "INIT_FAILED", "message": "M3编排器未初始化"}}
+            telemetry.end_stream_monitoring(success=False)
             return
 
         try:
@@ -624,6 +632,7 @@ class AgentCore:
                 question = result.pending_questions[0]
                 ask_id = f"ask_{int(asyncio.get_event_loop().time())}"
                 print(f"[DEBUG] 发送 ask_user_open 事件: {question}")
+                telemetry.log_ask_user_event(session_id, ask_id, question, "open")
                 yield {"type": "ask_user_open", "payload": {"ask_id": ask_id, "question": question}}
                 return  # 等待用户输入，不要继续执行
 
@@ -632,6 +641,7 @@ class AgentCore:
                 question = result.pending_questions[0]
                 ask_id = f"ask_{int(asyncio.get_event_loop().time())}"
                 print(f"[DEBUG] 发送 ask_user_open 事件 (waiting状态): {question}")
+                telemetry.log_ask_user_event(session_id, ask_id, question, "open")
                 yield {"type": "ask_user_open", "payload": {"ask_id": ask_id, "question": question}}
                 return  # 等待用户输入，不要继续执行
 
@@ -710,7 +720,11 @@ class AgentCore:
 
         except Exception as e:
             logger.error(f"M3流式处理失败: {e}")
+            telemetry.log_error("STREAM_PROCESS_FAILED", session_id, e)
             yield {"type": "error", "payload": {"code": "PROCESS_FAILED", "message": f"处理失败: {str(e)}"}}
+        finally:
+            # 结束telemetry监控
+            telemetry.end_stream_monitoring(success=True)
 
     async def _process_with_m3(self, user_query: str, context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """
