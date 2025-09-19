@@ -685,17 +685,27 @@ class AgentCore:
                 print(f"[DEBUG] 后端ask_user处理完成，return结束当前轮次")
                 return  # 等待用户输入，不要继续执行
 
-            # 检查是否处于等待用户输入状态
-            if result.status == "waiting_for_user" and result.pending_questions:
-                question = result.pending_questions[0]
-                ask_id = f"ask_{int(asyncio.get_event_loop().time())}"
-                print(f"[DEBUG] 发送 ask_user_open 事件 (waiting状态): {question}")
+            # 统一处理ask_user和waiting_for_user状态
+            if result.status in ("ask_user", "waiting_for_user") and result.pending_questions:
+                # 从ask_user_pending中提取ask_id和step_id，确保前后端一致
+                ask_user_pending = result.execution_state.get_artifact("ask_user_pending")
+                if ask_user_pending:
+                    ask_id = ask_user_pending.get("ask_id", f"ask_{int(asyncio.get_event_loop().time())}")
+                    step_id = ask_user_pending.get("step_id", "")
+                    question = result.pending_questions[0]
+                else:
+                    # 后备方案：生成新的ask_id
+                    ask_id = f"ask_{int(asyncio.get_event_loop().time())}"
+                    step_id = ""
+                    question = result.pending_questions[0]
+
+                print(f"[DEBUG] 发送 ask_user_open 事件: {question} (ask_id: {ask_id})")
                 telemetry_logger.log_event(
                     stage=TelemetryStage.ASK_USER,
                     event=TelemetryEvent.ASK_USER_IGNORED,
-                    context={"ask_id": ask_id, "question": question, "action": "open"}
+                    context={"ask_id": ask_id, "question": question, "step_id": step_id, "action": "open"}
                 )
-                yield {"type": "ask_user_open", "payload": {"ask_id": ask_id, "question": question}}
+                yield {"type": "ask_user_open", "payload": {"ask_id": ask_id, "question": question, "step_id": step_id}}
                 return  # 等待用户输入，不要继续执行
 
             # 状态：开始执行
@@ -911,27 +921,31 @@ class AgentCore:
 1. 基础对话和问答
 2. 工具调用能力 - 你可以调用工具来获取外部信息"""
 
+        # 动态生成工具列表提示词
         if self.tools:
-            tool_names = [tool.name for tool in self.tools]
-            base_prompt += f"\n3. 可用工具: {', '.join(tool_names)}"
+            from tool_registry import tools_to_json
+            tools_json = tools_to_json(self.tools)
+            base_prompt += f"""
+3. 可用工具列表（JSON）:
+{tools_json}"""
 
         base_prompt += """
 
 INSTRUCTIONS:
 You are a helpful AI assistant with access to tools. When a user asks a question that requires external information, you MUST call the appropriate tool.
 
-TOOL USAGE RULES:
-- For time-related questions (current time, day of week, date): Call time_now
-- For weather queries: Call weather_get
-- For math calculations: Call math_calc
-- For calendar/schedule queries: Call calendar_read
-- For email queries: Call email_list
-- For web searches: Call web_search
-- For file reading: Call file_read
-- For file writing: Call file_write (supports path aliases like "桌面", "下载", "文档")
-- For asking user information (location, date, etc.): Call ask_user
+TOOL USAGE GUIDELINES:
+- Analyze user requests and determine which tool is most appropriate
+- If location/city information is missing, call ask_user with appropriate parameters
+- If date/time information is missing, call ask_user with appropriate parameters
+- Use the tool's parameters field to understand what information each tool needs
+- Always provide complete and accurate tool calls
 
-IMPORTANT: Always call the appropriate tool when external information is needed. Do not provide generic responses."""
+IMPORTANT RULES:
+- When external information is needed, ALWAYS call the appropriate tool
+- If you need to ask the user for information, use ask_user tool
+- Do not provide generic or placeholder responses
+- Use the exact tool names and parameter names as specified in the tool list"""
 
         return base_prompt
 

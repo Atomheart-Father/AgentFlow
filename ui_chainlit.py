@@ -220,7 +220,15 @@ async def handle_resume_with_answer(user_answer: str, session_id: str):
             # 查找ask_user_pending并设置答案
             ask_user_pending = session.active_task.execution_state.get_artifact("ask_user_pending")
             if ask_user_pending and isinstance(ask_user_pending, dict):
-                output_key = ask_user_pending.get("output_key", "user_answer")
+                # 根据expects字段确定正确的output_key
+                expects = ask_user_pending.get("expects", "answer")
+                if expects == "city":
+                    output_key = "user_city"
+                elif expects == "date":
+                    output_key = "user_date"
+                else:
+                    output_key = ask_user_pending.get("output_key", "user_answer")
+
                 session.active_task.execution_state.set_artifact(output_key, user_answer)
                 # 清除pending状态
                 session.active_task.execution_state.set_artifact("ask_user_pending", None)

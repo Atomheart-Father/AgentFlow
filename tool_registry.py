@@ -34,6 +34,30 @@ class Tool(Protocol):
         ...
 
 
+def tools_to_json(tools: List[Tool]) -> str:
+    """
+    将工具列表转换为JSON字符串，用于动态生成系统提示词
+
+    Args:
+        tools: 工具列表
+
+    Returns:
+        JSON格式的工具描述字符串
+    """
+    import json
+
+    tool_list = []
+    for tool in tools:
+        tool_info = {
+            "name": tool.name,
+            "description": tool.description,
+            "parameters": tool.parameters
+        }
+        tool_list.append(tool_info)
+
+    return json.dumps(tool_list, ensure_ascii=False, indent=2)
+
+
 def to_openai_tools(tools: List[Tool]) -> List[Dict[str, Any]]:
     """
     将工具转换为OpenAI格式

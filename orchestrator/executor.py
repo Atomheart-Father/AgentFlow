@@ -521,11 +521,11 @@ class Executor:
         # 设置ask_user_pending状态（包含ask_id）
         ask_user_pending = {
             "ask_id": ask_id,
-            "question": question,
+            "questions": [question],  # 问题列表，UI 只取第一个
+            "expects": self._determine_expects_type(step, inputs),  # 根据步骤和输入确定期望类型
             "step_id": step.step_id,
-            "output_key": step.output_key,
-            "context": inputs.get("context", ""),
-            "questions": [question]  # 确保questions字段存在
+            "output_key": self._determine_output_key(step, inputs),  # 确定答案存放的键
+            "context": inputs.get("context", "")  # 可选，补充上下文
         }
 
         state.set_artifact("ask_user_pending", ask_user_pending)
@@ -550,6 +550,47 @@ class Executor:
         logger.info(f"网络搜索步骤 {step.id} 完成，输出到: {step.output_key}")
 
     # _execute_ask_user已移除，现在通过ask_user工具处理
+
+    def _determine_expects_type(self, step: PlanStep, inputs: Dict[str, Any]) -> str:
+        """
+        根据步骤和输入确定期望的答案类型
+
+        Args:
+            step: 计划步骤
+            inputs: 输入参数
+
+        Returns:
+            期望类型: "city", "date", "answer"
+        """
+        # 从问题内容推断期望类型
+        question = step.expect.lower() if hasattr(step, 'expect') and step.expect else ""
+
+        if "城市" in question or "地点" in question or "city" in question or "location" in question:
+            return "city"
+        elif "日期" in question or "时间" in question or "date" in question or "time" in question:
+            return "date"
+        else:
+            return "answer"
+
+    def _determine_output_key(self, step: PlanStep, inputs: Dict[str, Any]) -> str:
+        """
+        根据步骤和输入确定答案存放的键
+
+        Args:
+            step: 计划步骤
+            inputs: 输入参数
+
+        Returns:
+            输出键名
+        """
+        expects = self._determine_expects_type(step, inputs)
+
+        if expects == "city":
+            return "user_city"
+        elif expects == "date":
+            return "user_date"
+        else:
+            return step.output_key or "user_answer"
 
     async def _execute_process(self, step: PlanStep, inputs: Dict[str, Any], state: ExecutionState):
         """执行推理处理步骤"""
