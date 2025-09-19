@@ -124,11 +124,19 @@ class SessionState:
 
         return "\n".join(context_parts)
 
-    def set_pending_ask(self, question: str, expects: str):
+    def set_pending_ask(self, question: str, expects_or_ask_id: str):
         """设置挂起的问题"""
-        ask_id = str(uuid.uuid4())
+        # 如果expects_or_ask_id看起来像ask_id（以ask_开头），就直接使用
+        if expects_or_ask_id.startswith("ask_"):
+            ask_id = expects_or_ask_id
+            expects = "answer"
+        else:
+            # 否则生成新的ask_id
+            ask_id = str(uuid.uuid4())
+            expects = expects_or_ask_id
+
         self.pending_ask = PendingAsk(ask_id, question, expects)
-        logger.info(f"设置挂起问题: {question} (期望: {expects})")
+        logger.info(f"设置挂起问题: {question} (ask_id: {ask_id}, 期望: {expects})")
 
     def clear_pending_ask(self):
         """清除挂起的问题"""
@@ -724,6 +732,7 @@ class Orchestrator:
             if user_query == "RESUME_TASK" and result.final_plan:
                 logger.info("检测到RESUME_TASK，跳过重新规划，直接使用现有计划")
                 return OrchestratorState.ACT
+
 
             # 创建计划
             plan = await self.planner.create_plan(user_query, context)

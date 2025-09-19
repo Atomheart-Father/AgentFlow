@@ -530,7 +530,7 @@ class AgentCore:
     async def _process_with_m3_stream(self, user_query: str, context: Optional[Dict[str, Any]] = None):
         """使用M3编排器处理查询（真·流式：assistant_content进聊天气泡，其他事件进状态栏）"""
         if not hasattr(self, 'orchestrator') or not self.orchestrator:
-            yield {"type": "error", "message": "M3编排器未初始化"}
+            yield {"type": "error", "payload": {"code": "INIT_FAILED", "message": "M3编排器未初始化"}}
             return
 
         try:
@@ -540,7 +540,7 @@ class AgentCore:
             if is_resume:
                 # 续跑场景：继续执行已有的任务
                 print("[DEBUG] 检测到续跑场景，开始继续执行任务")
-                yield {"type": "status", "message": "正在继续执行任务"}
+                yield {"type": "status", "payload": {"message": "正在继续执行任务"}}
 
                 session_id = context.get("session_id")
                 user_answer = context.get("user_answer")
@@ -582,9 +582,9 @@ class AgentCore:
             else:
                 # 正常规划场景
                 print("[DEBUG] 发送状态事件: 正在规划任务")
-                yield {"type": "status", "message": "正在规划任务"}
+                yield {"type": "status", "payload": {"message": "正在规划任务"}}
 
-                # 模拟规划过程的思维链
+                # 模拟规划过程的思维链 - 使用统一事件协议
                 planning_steps = [
                     "分析用户查询意图...",
                     "制定执行计划...",
@@ -594,51 +594,53 @@ class AgentCore:
 
                 for step in planning_steps:
                     print(f"[DEBUG] 发送思维链: {step}")
-                    yield {"type": "assistant_content", "content": step + " "}
+                    yield {"type": "assistant_content", "payload": {"delta": step + " "}}
                     await asyncio.sleep(0.1)
 
                 # 执行编排
                 result = await self.orchestrator.orchestrate(user_query=user_query, context=context)
 
-            # 检查是否需要用户输入
+            # 检查是否需要用户输入 - 使用统一事件协议
             print(f"[DEBUG] 检查ask_user状态 - status: {result.status}, pending_questions: {result.pending_questions}")
             if result.status == "ask_user" and result.pending_questions:
                 question = result.pending_questions[0]
-                print(f"[DEBUG] 发送 ask_user 事件: {question}")
-                yield {"type": "ask_user", "question": question, "context": "需要用户信息"}
+                ask_id = f"ask_{int(asyncio.get_event_loop().time())}"
+                print(f"[DEBUG] 发送 ask_user_open 事件: {question}")
+                yield {"type": "ask_user_open", "payload": {"ask_id": ask_id, "question": question}}
                 return  # 等待用户输入，不要继续执行
 
             # 检查是否处于等待用户输入状态
             if result.status == "waiting_for_user" and result.pending_questions:
                 question = result.pending_questions[0]
-                print(f"[DEBUG] 发送 ask_user 事件 (waiting状态): {question}")
-                yield {"type": "ask_user", "question": question, "context": "需要用户信息"}
+                ask_id = f"ask_{int(asyncio.get_event_loop().time())}"
+                print(f"[DEBUG] 发送 ask_user_open 事件 (waiting状态): {question}")
+                yield {"type": "ask_user_open", "payload": {"ask_id": ask_id, "question": question}}
                 return  # 等待用户输入，不要继续执行
 
             # 状态：开始执行
             print("[DEBUG] 发送状态事件: 正在执行任务")
-            yield {"type": "status", "message": "正在执行任务"}
+            yield {"type": "status", "payload": {"message": "正在执行任务"}}
 
             # 模拟执行过程的思维链
             if result.final_plan and result.final_plan.steps:
                 for i, step in enumerate(result.final_plan.steps, 1):
                     step_type_str = step.type.value if hasattr(step.type, 'value') else str(step.type)
                     print(f"[DEBUG] 发送工具轨迹: 执行步骤 {i}: {step_type_str}")
-                    yield {"type": "tool_trace", "message": f"执行步骤 {i}: {step_type_str}"}
+                    yield {"type": "tool_trace", "payload": {"tool": step.tool or "unknown", "action": f"执行步骤 {i}", "result": step_type_str}}
 
                     # 根据步骤类型显示不同的执行信息
                     if step.type == "tool_call" and hasattr(step, 'tool') and step.tool:
                         print(f"[DEBUG] 发送工具调用: 调用工具 {step.tool}")
-                        yield {"type": "assistant_content", "content": f"\n调用工具 {step.tool}... "}
+                        yield {"type": "assistant_content", "payload": {"delta": f"\n调用工具 {step.tool}... "}}
                     elif step.type == "web_search":
                         print(f"[DEBUG] 发送网络搜索: 搜索 {step.inputs.get('query', '')}")
-                        yield {"type": "assistant_content", "content": f"\n执行网络搜索... "}
+                        yield {"type": "assistant_content", "payload": {"delta": f"\n执行网络搜索... "}}
                     elif step.type == "ask_user":
                         print(f"[DEBUG] 发送用户询问: {step.inputs.get('question', '')}")
-                        yield {"type": "assistant_content", "content": f"\n需要用户信息... "}
+                        yield {"type": "assistant_content", "payload": {"delta": f"\n需要用户信息... "}}
                     elif step.type == "summarize":
                         print(f"[DEBUG] 发送数据汇总: {step.expect}")
-                        yield {"type": "assistant_content", "content": f"\n汇总分析数据... "}
+                        yield {"type": "assistant_content", "payload": {"delta": f"\n汇总分析数据... "}}
 
                     await asyncio.sleep(0.1)
 
@@ -682,15 +684,15 @@ class AgentCore:
             # 真·流式输出最终内容
             if final_content:
                 print(f"[DEBUG] 发送最终内容: {final_content[:100]}...")
-                yield {"type": "assistant_content", "content": final_content}
+                yield {"type": "final_answer", "payload": {"answer": final_content}}
 
             # 状态：处理完成
             print("[DEBUG] 发送状态事件: 处理完成")
-            yield {"type": "status", "message": "处理完成"}
+            yield {"type": "status", "payload": {"message": "处理完成"}}
 
         except Exception as e:
             logger.error(f"M3流式处理失败: {e}")
-            yield {"type": "error", "message": f"处理失败: {str(e)}"}
+            yield {"type": "error", "payload": {"code": "PROCESS_FAILED", "message": f"处理失败: {str(e)}"}}
 
     async def _process_with_m3(self, user_query: str, context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """

@@ -119,9 +119,23 @@ async def handle_resume_with_answer(user_answer: str, session_id: str):
     # 记录用户回答到对话历史
     session.add_message("user", f"回答了问题: {user_answer}")
 
+    # 验证ask_id一致性
+    current_ask_id = cl.user_session.get("current_ask_id", "")
+    if pending_ask and hasattr(pending_ask, 'ask_id') and current_ask_id != pending_ask.ask_id:
+        await cl.Message(content=f"❌ AskID不匹配: 期望 {current_ask_id}, 收到 {pending_ask.ask_id}", author="系统").send()
+        return
+
+    # 发送ask_user_close事件
+    if current_ask_id:
+        # 这里可以发送ask_user_close事件，但由于我们已经修改了协议，这里先跳过
+        pass
+
     # 清除pending状态
-    pending_ask = session.pending_ask
     session.clear_pending_ask()
+
+    # 清除前端状态
+    cl.user_session.set("waiting_for_user_input", False)
+    cl.user_session.set("current_ask_id", "")
 
     try:
         # 调试信息：检查session状态
@@ -199,11 +213,11 @@ async def handle_resume_with_answer(user_answer: str, session_id: str):
         # 使用agent_core的流式处理方法继续执行（传递session的active_task）
         async for event in agent_core._process_with_m3_stream("", context=context):
             event_type = event.get("type", "")
-            message = event.get("message", "")
+            payload = event.get("payload", {})
 
             if event_type == "assistant_content":
-                # 真·流式：逐token输出
-                content_delta = event.get("content", "")
+                # 真·流式：逐token输出到聊天区域
+                content_delta = payload.get("delta", "")
                 if content_delta:
                     await assistant_msg.stream_token(content_delta)
                     full_content += content_delta  # 累积内容
@@ -211,6 +225,7 @@ async def handle_resume_with_answer(user_answer: str, session_id: str):
 
             elif event_type in ["status", "tool_trace", "debug"]:
                 # 事件分流：进入侧栏
+                message = payload.get("message", "")
                 if message:
                     log_entry = f"🔄 {message}"
                     sidebar_logs.append(log_entry)
@@ -221,20 +236,30 @@ async def handle_resume_with_answer(user_answer: str, session_id: str):
                         author="系统日志"
                     ).send()
 
-            elif event_type == "ask_user":
+            elif event_type == "ask_user_open":
                 # 如果又有新问题，设置新的pending状态
-                question = event.get("question", "请提供更多信息")
+                ask_id = payload.get("ask_id", "")
+                question = payload.get("question", "请提供更多信息")
                 ask_msg = await cl.Message(
                     content=f"🤔 {question}\n\n请直接回复，我将继续处理。",
                     author="助手"
                 ).send()
-                session.set_pending_ask(question, "answer")
+                session.set_pending_ask(question, ask_id)
                 cl.user_session.set("waiting_for_user_input", True)
+                cl.user_session.set("current_ask_id", ask_id)
                 return
+
+            elif event_type == "final_answer":
+                # 最终答案
+                answer = payload.get("answer", "")
+                if answer:
+                    await assistant_msg.stream_token(answer)
+                    full_content += answer
 
             elif event_type == "error":
                 # 错误处理
-                error_msg = event.get("message", "未知错误")
+                error_code = payload.get("code", "UNKNOWN")
+                error_msg = payload.get("message", "未知错误")
                 await assistant_msg.stream_token(f"\n\n❌ {error_msg}")
                 full_content += f"\n\n❌ {error_msg}"  # 累积错误内容
                 break
@@ -306,11 +331,11 @@ async def handle_complex_plan(user_input: str, session_id: str):
         # 正确处理异步生成器 - agent_core._process_with_m3_stream是async def
         async for event in agent_core._process_with_m3_stream(user_input, context={"session_id": session_id}):
             event_type = event.get("type", "")
-            message = event.get("message", "")
+            payload = event.get("payload", {})
 
             if event_type == "assistant_content":
-                # 真·流式：逐token输出
-                content_delta = event.get("content", "")
+                # 真·流式：逐token输出到聊天区域
+                content_delta = payload.get("delta", "")
                 if content_delta:
                     await assistant_msg.stream_token(content_delta)
                     full_content += content_delta  # 累积内容
@@ -318,6 +343,7 @@ async def handle_complex_plan(user_input: str, session_id: str):
 
             elif event_type in ["status", "tool_trace", "debug"]:
                 # 事件分流：进入侧栏
+                message = payload.get("message", "")
                 if message:
                     log_entry = f"🔄 {message}"
                     sidebar_logs.append(log_entry)
@@ -328,10 +354,10 @@ async def handle_complex_plan(user_input: str, session_id: str):
                         author="系统日志"
                     ).send()
 
-            elif event_type == "ask_user":
+            elif event_type == "ask_user_open":
                 # AskUser优化：发问即返回，下条消息resume
-                question = event.get("question", "请提供更多信息")
-                context_info = event.get("context", "")
+                ask_id = payload.get("ask_id", "")
+                question = payload.get("question", "请提供更多信息")
 
                 # 显示问题并设置等待状态
                 ask_msg = await cl.Message(
@@ -339,19 +365,28 @@ async def handle_complex_plan(user_input: str, session_id: str):
                     author="助手"
                 ).send()
 
-                # 设置前端等待状态
+                # 设置前端等待状态和ask_id
                 cl.user_session.set("waiting_for_user_input", True)
+                cl.user_session.set("current_ask_id", ask_id)
 
                 # 设置后端pending_ask状态
                 session = get_session(session_id)
-                session.set_pending_ask(question, "answer")
+                session.set_pending_ask(question, ask_id)
 
                 # 立即返回，不继续处理（避免超时）
                 return
 
+            elif event_type == "final_answer":
+                # 最终答案
+                answer = payload.get("answer", "")
+                if answer:
+                    await assistant_msg.stream_token(answer)
+                    full_content += answer
+
             elif event_type == "error":
                 # 错误处理
-                error_msg = event.get("message", "未知错误")
+                error_code = payload.get("code", "UNKNOWN")
+                error_msg = payload.get("message", "未知错误")
                 await assistant_msg.stream_token(f"\n\n❌ {error_msg}")
                 full_content += f"\n\n❌ {error_msg}"  # 累积错误内容
                 break
