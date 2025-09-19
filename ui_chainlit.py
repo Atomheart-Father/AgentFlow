@@ -111,11 +111,13 @@ async def on_message(message: cl.Message):
 
 async def handle_resume_with_answer(user_answer: str, session_id: str):
     """处理用户对pending_ask的回答 - 会话续跑"""
+    print(f"[DEBUG] UI进入续跑函数 - session_id='{session_id}', user_answer='{user_answer}'")
     global agent_core
     from orchestrator import get_session
     from session_manager import session_manager
     from utils.telemetry import get_telemetry_logger, TelemetryEvent, TelemetryStage
     session = get_session(session_id)
+    print(f"[DEBUG] UI获取session完成，检查是否有pending_ask: {session.has_pending_ask()}")
 
     if not session.has_pending_ask():
         await cl.Message(content="❌ 没有等待回答的问题").send()
@@ -260,6 +262,8 @@ async def handle_resume_with_answer(user_answer: str, session_id: str):
         sidebar_logs = []
         # 累积assistant_content
         full_content = ""
+        # token计数用于调试
+        token_count = 0
 
         # 使用agent_core的流式处理方法继续执行（传递session的active_task）
         async for event in agent_core._process_with_m3_stream("", context=context):
@@ -272,6 +276,9 @@ async def handle_resume_with_answer(user_answer: str, session_id: str):
                 if content_delta:
                     await assistant_msg.stream_token(content_delta)
                     full_content += content_delta  # 累积内容
+                    token_count += 1  # 计数token
+                    if token_count % 10 == 0:  # 每10个token打印一次日志
+                        print(f"[DEBUG] UI流式token计数: {token_count}")
                     await asyncio.sleep(0)  # 让事件循环flush
 
             elif event_type in ["status", "tool_trace", "debug"]:
@@ -291,13 +298,21 @@ async def handle_resume_with_answer(user_answer: str, session_id: str):
                 # 如果又有新问题，设置新的pending状态
                 ask_id = payload.get("ask_id", "")
                 question = payload.get("question", "请提供更多信息")
+                print(f"[DEBUG] UI收到ask_user_open事件 - ask_id='{ask_id}', question='{question}'")
+
+                # 发送问句消息给用户
                 ask_msg = await cl.Message(
                     content=f"🤔 {question}\n\n请直接回复，我将继续处理。",
                     author="助手"
                 ).send()
+                print(f"[DEBUG] UI发送问句消息完成")
+
+                # 设置pending状态
                 session.set_pending_ask(question, ask_id)
                 cl.user_session.set("waiting_for_user_input", True)
                 cl.user_session.set("current_ask_id", ask_id)
+
+                print(f"[DEBUG] UI设置pending状态完成，准备return结束本轮")
                 return
 
             elif event_type == "final_answer":
@@ -318,6 +333,7 @@ async def handle_resume_with_answer(user_answer: str, session_id: str):
         # 完成流式输出
         # 完成流式输出 - 最后一次update()确保消息完成状态
         await assistant_msg.update()
+        print(f"[DEBUG] UI流式输出完成，总token数: {token_count}")
 
         # 添加完成标记到侧栏
         completion_log = "✅ 任务继续完成"
@@ -392,6 +408,9 @@ async def handle_complex_plan(user_input: str, session_id: str):
                 if content_delta:
                     await assistant_msg.stream_token(content_delta)
                     full_content += content_delta  # 累积内容
+                    token_count += 1  # 计数token
+                    if token_count % 10 == 0:  # 每10个token打印一次日志
+                        print(f"[DEBUG] UI流式token计数: {token_count}")
                     await asyncio.sleep(0)  # 让事件循环flush
 
             elif event_type in ["status", "tool_trace", "debug"]:
@@ -447,6 +466,7 @@ async def handle_complex_plan(user_input: str, session_id: str):
         # 完成流式输出
         # 完成流式输出 - 最后一次update()确保消息完成状态
         await assistant_msg.update()
+        print(f"[DEBUG] UI流式输出完成，总token数: {token_count}")
 
         # 添加完成标记到侧栏
         completion_log = "✅ 处理完成"

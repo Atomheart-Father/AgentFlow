@@ -664,7 +664,7 @@ class AgentCore:
                     ask_id = f"ask_{int(asyncio.get_event_loop().time())}"
                     step_id = ""
 
-                print(f"[DEBUG] 发送 ask_user_open 事件: {question}, ask_id: {ask_id}")
+                print(f"[DEBUG] 后端触发ask_user - 准备yield ask_user_open事件: question='{question}', ask_id='{ask_id}', step_id='{step_id}'")
                 from utils.telemetry import log_ask_user_open
                 # 获取active_task_id用于三元组日志
                 active_task_id = ""
@@ -678,7 +678,9 @@ class AgentCore:
                     step_id=step_id,
                     active_task_id=active_task_id
                 )
+                print(f"[DEBUG] 后端yield ask_user_open事件完成，准备return结束本轮")
                 yield {"type": "ask_user_open", "payload": {"ask_id": ask_id, "question": question, "step_id": step_id}}
+                print(f"[DEBUG] 后端ask_user处理完成，return结束当前轮次")
                 return  # 等待用户输入，不要继续执行
 
             # 检查是否处于等待用户输入状态
