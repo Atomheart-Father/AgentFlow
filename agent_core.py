@@ -666,11 +666,17 @@ class AgentCore:
 
                 print(f"[DEBUG] 发送 ask_user_open 事件: {question}, ask_id: {ask_id}")
                 from utils.telemetry import log_ask_user_open
+                # 获取active_task_id用于三元组日志
+                active_task_id = ""
+                if hasattr(result, 'execution_state') and result.execution_state:
+                    # 这里可以从execution_state中获取active_task信息
+                    pass
                 log_ask_user_open(
                     session_id=session_id,
                     ask_id=ask_id,
                     question=question,
-                    step_id=step_id
+                    step_id=step_id,
+                    active_task_id=active_task_id
                 )
                 yield {"type": "ask_user_open", "payload": {"ask_id": ask_id, "question": question, "step_id": step_id}}
                 return  # 等待用户输入，不要继续执行

@@ -270,28 +270,33 @@ def log_write_out_of_sandbox(**kwargs) -> str:
     return logger.log_write_out_of_sandbox(**kwargs)
 
 
-def log_ask_user_open(session_id: str, ask_id: str, question: str, step_id: str = "") -> str:
+def log_ask_user_open(session_id: str, ask_id: str, question: str, step_id: str = "", active_task_id: str = "") -> str:
     """记录 ASK_USER_OPEN 事件"""
     logger = get_telemetry_logger()
     return logger.log_event(
         stage=TelemetryStage.ASK_USER,
         event=TelemetryEvent.ASK_USER_OPEN,
         context={
+            "session_id": session_id,
+            "active_task_id": active_task_id,
             "ask_id": ask_id,
-            "question": question,
-            "step_id": step_id
+            "step_id": step_id,
+            "question": question
         }
     )
 
 
-def log_ask_user_resume(session_id: str, ask_id: str, answer: str, latency_ms: int = 0) -> str:
+def log_ask_user_resume(session_id: str, ask_id: str, answer: str, latency_ms: int = 0, step_id: str = "", active_task_id: str = "") -> str:
     """记录 ASK_USER_RESUME 事件"""
     logger = get_telemetry_logger()
     return logger.log_event(
         stage=TelemetryStage.ASK_USER,
         event=TelemetryEvent.ASK_USER_RESUME,
         context={
+            "session_id": session_id,
+            "active_task_id": active_task_id,
             "ask_id": ask_id,
+            "step_id": step_id,
             "answer_len": len(answer),
             "latency_ms": latency_ms
         }

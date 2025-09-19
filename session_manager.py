@@ -116,10 +116,20 @@ class SessionManager:
             with open(state_file, 'r', encoding='utf-8') as f:
                 state_data = json.load(f)
 
-            # 这里应该返回反序列化的ExecutionState对象
-            # 但由于导入循环问题，我们先返回字典，让调用方处理
+            # 反序列化为ExecutionState对象
+            from orchestrator.executor import ExecutionState
+            execution_state = ExecutionState()
+            execution_state.cursor_index = state_data.get("cursor_index", 0)
+            execution_state.done_set = set(state_data.get("done_set", []))
+            execution_state.asked_map = dict(state_data.get("asked_map", {}))
+            execution_state.answers = dict(state_data.get("answers", {}))
+            execution_state.artifacts = dict(state_data.get("artifacts", {}))
+            execution_state.errors = list(state_data.get("errors", []))
+            execution_state.completed_steps = list(state_data.get("completed_steps", []))
+            execution_state.asked_questions = list(state_data.get("asked_questions", []))
+
             logger.debug(f"已加载execution_state从 {state_file}")
-            return state_data
+            return execution_state
 
         except Exception as e:
             logger.error(f"加载execution_state失败: {e}")

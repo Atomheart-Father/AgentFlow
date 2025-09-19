@@ -87,12 +87,12 @@ def compute_step_id(step_dict: Dict[str, Any]) -> str:
     Returns:
         str: 16位十六进制稳定ID
     """
-    # 提取用于计算签名的关键字段
+    # 提取用于计算签名的关键字段（只包含结构信息，不包含运行时值）
     signature_data = {
         "type": step_dict.get("type", ""),
         "tool": step_dict.get("tool", ""),
         "output_key": step_dict.get("output_key", ""),
-        "expect": step_dict.get("expect", ""),
+        # 注意：不包含expect（自然语言描述）和运行时参数值，以确保ID稳定
     }
 
     # 对于tool_call，包含参数schema签名
@@ -101,16 +101,21 @@ def compute_step_id(step_dict: Dict[str, Any]) -> str:
         # 只包含schema结构，不包含运行时值
         signature_data["inputs_schema"] = {k: type(v).__name__ for k, v in inputs.items()}
 
-    # 对于ask_user，包含问题模式特征（避免文本变化导致ID变化）
+    # 对于ask_user，只包含结构信息（目标写入键和问题类型），不包含原始文本
     if step_dict.get("type") == "ask_user":
         question = step_dict.get("inputs", {}).get("question", "")
-        # 提取问题模式：城市/日期/地点等关键词
+        # 提取问题模式：城市/日期/地点等关键词（只用于分类，不签原始文本）
         if any(word in question.lower() for word in ["城市", "city", "地点", "location"]):
             signature_data["question_type"] = "location"
         elif any(word in question.lower() for word in ["日期", "时间", "date", "time", "when"]):
             signature_data["question_type"] = "datetime"
         else:
             signature_data["question_type"] = "general"
+
+        # 包含目标写入键（决定答案写到execution_state的哪个artifact）
+        output_key = step_dict.get("output_key", "")
+        if output_key:
+            signature_data["target_key"] = output_key
 
     # 计算SHA1哈希，取前16位
     signature_str = json.dumps(signature_data, sort_keys=True, separators=(',', ':'))
