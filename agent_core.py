@@ -11,6 +11,10 @@ from llm_interface import get_llm_interface, LLMResponse
 from config import get_config
 from logger import get_logger
 from tool_registry import get_tools, execute_tool, ToolError, to_openai_tools
+# 导入telemetry模块
+import sys
+import os
+sys.path.append(os.path.dirname(__file__))
 from utils.telemetry import get_telemetry_logger, TelemetryEvent, TelemetryStage
 
 logger = get_logger()
@@ -592,7 +596,23 @@ class AgentCore:
                                     print(f"[DEBUG] 默认设置用户答案到 user_answer: {user_answer}")
 
                         # 使用现有的active_task继续编排 - 使用resume标识符避免重新规划
-                        result = await self.orchestrator.orchestrate(user_query="RESUME_TASK", context=context, active_task=session.active_task)
+                        # 将execution_state转换为字典格式以确保正确恢复
+                        if hasattr(session.active_task, 'execution_state') and session.active_task.execution_state:
+                            # 创建字典格式的execution_state副本
+                            execution_state_dict = {
+                                "artifacts": dict(session.active_task.execution_state.artifacts),
+                                "errors": list(session.active_task.execution_state.errors),
+                                "completed_steps": list(session.active_task.execution_state.completed_steps),
+                                "asked_questions": list(session.active_task.execution_state.asked_questions)
+                            }
+                            # 临时将execution_state设置为字典格式
+                            original_execution_state = session.active_task.execution_state
+                            session.active_task.execution_state = execution_state_dict
+                            result = await self.orchestrator.orchestrate(user_query="RESUME_TASK", context=context, active_task=session.active_task)
+                            # 恢复原始execution_state
+                            session.active_task.execution_state = original_execution_state
+                        else:
+                            result = await self.orchestrator.orchestrate(user_query="RESUME_TASK", context=context, active_task=session.active_task)
                     else:
                         # 没有活跃任务，尝试重新规划并创建新的active_task
                         print(f"[DEBUG] 续跑场景没有找到active_task，重新规划")
