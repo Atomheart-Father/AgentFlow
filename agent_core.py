@@ -11,7 +11,7 @@ from llm_interface import get_llm_interface, LLMResponse
 from config import get_config
 from logger import get_logger
 from tool_registry import get_tools, execute_tool, ToolError, to_openai_tools
-from telemetry import telemetry, TelemetryEvent
+from utils.telemetry import get_telemetry_logger, TelemetryEvent, TelemetryStage
 
 logger = get_logger()
 
@@ -533,12 +533,15 @@ class AgentCore:
         session_id = context.get("session_id", "unknown") if context else "unknown"
 
         # 开始telemetry监控
-        telemetry.start_stream_monitoring(session_id)
+        telemetry_logger = get_telemetry_logger()
 
         if not hasattr(self, 'orchestrator') or not self.orchestrator:
-            telemetry.log_error("INIT_FAILED", session_id, RuntimeError("M3编排器未初始化"))
+            telemetry_logger.log_event(
+                stage=TelemetryStage.ACT,
+                event=TelemetryEvent.EXEC_TOOL_FAIL,
+                context={"error": "M3编排器未初始化"}
+            )
             yield {"type": "error", "payload": {"code": "INIT_FAILED", "message": "M3编排器未初始化"}}
-            telemetry.end_stream_monitoring(success=False)
             return
 
         try:
@@ -632,7 +635,11 @@ class AgentCore:
                 question = result.pending_questions[0]
                 ask_id = f"ask_{int(asyncio.get_event_loop().time())}"
                 print(f"[DEBUG] 发送 ask_user_open 事件: {question}")
-                telemetry.log_ask_user_event(session_id, ask_id, question, "open")
+                telemetry_logger.log_event(
+                    stage=TelemetryStage.ASK_USER,
+                    event=TelemetryEvent.ASK_USER_IGNORED,
+                    context={"ask_id": ask_id, "question": question, "action": "open"}
+                )
                 yield {"type": "ask_user_open", "payload": {"ask_id": ask_id, "question": question}}
                 return  # 等待用户输入，不要继续执行
 
@@ -641,7 +648,11 @@ class AgentCore:
                 question = result.pending_questions[0]
                 ask_id = f"ask_{int(asyncio.get_event_loop().time())}"
                 print(f"[DEBUG] 发送 ask_user_open 事件 (waiting状态): {question}")
-                telemetry.log_ask_user_event(session_id, ask_id, question, "open")
+                telemetry_logger.log_event(
+                    stage=TelemetryStage.ASK_USER,
+                    event=TelemetryEvent.ASK_USER_IGNORED,
+                    context={"ask_id": ask_id, "question": question, "action": "open"}
+                )
                 yield {"type": "ask_user_open", "payload": {"ask_id": ask_id, "question": question}}
                 return  # 等待用户输入，不要继续执行
 
@@ -720,11 +731,15 @@ class AgentCore:
 
         except Exception as e:
             logger.error(f"M3流式处理失败: {e}")
-            telemetry.log_error("STREAM_PROCESS_FAILED", session_id, e)
+            telemetry_logger.log_event(
+                stage=TelemetryStage.ACT,
+                event=TelemetryEvent.EXEC_TOOL_FAIL,
+                context={"error": str(e), "stage": "stream_processing"}
+            )
             yield {"type": "error", "payload": {"code": "PROCESS_FAILED", "message": f"处理失败: {str(e)}"}}
         finally:
-            # 结束telemetry监控
-            telemetry.end_stream_monitoring(success=True)
+            # 处理完成
+            pass
 
     async def _process_with_m3(self, user_query: str, context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """
