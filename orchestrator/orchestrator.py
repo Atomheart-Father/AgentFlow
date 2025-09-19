@@ -59,6 +59,21 @@ class PendingAsk:
         }
 
 
+class ConversationMessage:
+    """对话消息"""
+    def __init__(self, role: str, content: str, timestamp: float = None):
+        self.role = role  # "user" or "assistant"
+        self.content = content
+        self.timestamp = timestamp or time.time()
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "role": self.role,
+            "content": self.content,
+            "timestamp": self.timestamp
+        }
+
+
 class SessionState:
     """会话状态"""
     def __init__(self):
@@ -66,10 +81,48 @@ class SessionState:
         self.pending_ask: Optional[PendingAsk] = None
         self.session_id: str = str(uuid.uuid4())
         self.created_at: float = time.time()
+        self.conversation_history: List[ConversationMessage] = []  # 对话历史
+        self.user_preferences: Dict[str, Any] = {}  # 用户偏好信息
 
     def has_pending_ask(self) -> bool:
         """检查是否有挂起的问题"""
         return self.pending_ask is not None
+
+    def add_message(self, role: str, content: str):
+        """添加对话消息到历史"""
+        message = ConversationMessage(role, content)
+        self.conversation_history.append(message)
+        # 保持历史记录在合理的长度内
+        if len(self.conversation_history) > 50:
+            self.conversation_history = self.conversation_history[-50:]
+
+    def get_recent_messages(self, limit: int = 10) -> List[ConversationMessage]:
+        """获取最近的对话消息"""
+        return self.conversation_history[-limit:] if self.conversation_history else []
+
+    def set_user_preference(self, key: str, value: Any):
+        """设置用户偏好"""
+        self.user_preferences[key] = value
+
+    def get_user_preference(self, key: str, default: Any = None) -> Any:
+        """获取用户偏好"""
+        return self.user_preferences.get(key, default)
+
+    def get_conversation_context(self) -> str:
+        """获取对话上下文摘要"""
+        if not self.conversation_history:
+            return "新对话开始"
+
+        recent_messages = self.get_recent_messages(5)
+        context_parts = []
+
+        for msg in recent_messages:
+            role_name = "用户" if msg.role == "user" else "助手"
+            # 截取消息内容的前100个字符
+            content_preview = msg.content[:100] + "..." if len(msg.content) > 100 else msg.content
+            context_parts.append(f"{role_name}: {content_preview}")
+
+        return "\n".join(context_parts)
 
     def set_pending_ask(self, question: str, expects: str):
         """设置挂起的问题"""
@@ -155,7 +208,8 @@ class OrchestratorResult:
             "execution_state": {
                 "artifacts": self.execution_state.artifacts if self.execution_state else {},
                 "errors": self.execution_state.errors if self.execution_state else [],
-                "completed_steps": self.execution_state.completed_steps if self.execution_state else []
+                "completed_steps": self.execution_state.completed_steps if self.execution_state else [],
+                "asked_questions": self.execution_state.asked_questions if self.execution_state else []
             } if self.execution_state else None,
             "judge_history": [jr.dict() for jr in self.judge_history],
             "iteration_count": self.iteration_count,
@@ -378,14 +432,49 @@ class Orchestrator:
         if active_task:
             # 从现有任务恢复状态
             result.final_plan = active_task.plan
-            result.execution_state = active_task.execution_state
+
+            # 处理execution_state的反序列化
+            if isinstance(active_task.execution_state, dict):
+                # 从字典恢复ExecutionState
+                execution_state = ExecutionState()
+                execution_state.artifacts = active_task.execution_state.get("artifacts", {})
+                execution_state.errors = active_task.execution_state.get("errors", [])
+                execution_state.completed_steps = active_task.execution_state.get("completed_steps", [])
+                execution_state.asked_questions = active_task.execution_state.get("asked_questions", [])
+                result.execution_state = execution_state
+                logger.info(f"从字典恢复execution_state，已完成的步骤: {execution_state.completed_steps}, 已问问题: {execution_state.asked_questions}")
+            else:
+                result.execution_state = active_task.execution_state
+
             result.iteration_count = active_task.iteration_count
             result.plan_iterations = active_task.plan_iterations
             result.total_tool_calls = active_task.total_tool_calls
 
-        # 开始备现身复盘会话
-        session_id = f"session_{int(time.time())}_{hash(user_query) % 10000}"
-        self.post_mortem_logger.start_session(session_id, user_query, "m3")
+            # 检查是否已经有完整的execution_state可以直接继续执行
+            if result.execution_state and result.final_plan:
+                # 检查是否所有必要的用户输入都已提供
+                has_pending_ask = result.execution_state.get_artifact("ask_user_pending")
+                if not has_pending_ask:
+                    # 没有待处理的ask_user，可以直接从ACT阶段开始
+                    current_state = OrchestratorState.ACT
+                    logger.info("检测到完整的execution_state，直接从ACT阶段开始")
+                else:
+                    current_state = OrchestratorState.ASK_USER
+                    logger.info("检测到待处理的ask_user问题")
+            else:
+                current_state = OrchestratorState.PLAN
+        else:
+            current_state = OrchestratorState.PLAN
+
+        # 使用提供的session_id，如果没有则创建新的
+        if context and "session_id" in context:
+            session_id = context["session_id"]
+        else:
+            session_id = f"session_{int(time.time())}_{hash(user_query) % 10000}"
+
+        # 只在第一次调用时启动post_mortem会话
+        if not active_task:
+            self.post_mortem_logger.start_session(session_id, user_query, "m3")
 
         try:
             logger.info(f"开始编排用户查询: {user_query[:100]}{'...' if len(user_query) > 100 else ''}")
@@ -489,10 +578,34 @@ class Orchestrator:
         finally:
             result.total_time = time.time() - start_time
 
-            # 保存结果到active_task（如果存在）
-            if active_task:
-                active_task.result = result
-                active_task.update_activity()
+            # 保存结果到active_task
+            if not active_task:
+                # 如果没有传入active_task，创建一个新的
+                active_task = ActiveTask()
+                logger.info(f"为session {session_id} 创建新的active_task")
+
+            # 更新active_task状态
+            active_task.result = result
+            active_task.update_activity()
+            if result.final_plan:
+                active_task.plan = result.final_plan
+            if result.execution_state:
+                active_task.execution_state = result.execution_state
+            active_task.iteration_count = result.iteration_count
+            active_task.plan_iterations = result.plan_iterations
+            active_task.total_tool_calls = result.total_tool_calls
+
+            # 确保active_task被保存到session中
+            if session_id in _sessions:
+                session = _sessions[session_id]
+                session.active_task = active_task
+                logger.info(f"已保存active_task到session {session_id}")
+                print(f"[DEBUG] orchestrator保存active_task - session_id: {session_id}, active_task: {active_task is not None}")
+                print(f"[DEBUG] 保存的session id: {id(session)}")
+                print(f"[DEBUG] 保存的active_task id: {id(active_task)}")
+                print(f"[DEBUG] 保存的plan: {active_task.plan is not None}")
+                print(f"[DEBUG] 保存的execution_state: {active_task.execution_state is not None}")
+                print(f"[DEBUG] 保存的execution_state pending: {active_task.execution_state.get_artifact('ask_user_pending') if active_task.execution_state else None}")
 
             # 结束备现身复盘会话
             final_result = {
@@ -606,6 +719,11 @@ class Orchestrator:
         """规划阶段"""
         try:
             logger.info(f"规划阶段 (第{result.plan_iterations}轮)")
+
+            # 检查是否是续跑任务，如果是则跳过重新规划
+            if user_query == "RESUME_TASK" and result.final_plan:
+                logger.info("检测到RESUME_TASK，跳过重新规划，直接使用现有计划")
+                return OrchestratorState.ACT
 
             # 创建计划
             plan = await self.planner.create_plan(user_query, context)

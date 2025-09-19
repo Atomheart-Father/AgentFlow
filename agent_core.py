@@ -504,6 +504,29 @@ class AgentCore:
                 "error": f"处理请求时发生错误: {str(e)}"
             }
 
+    async def simple_chat(self, user_input: str, context: Optional[Dict[str, Any]] = None) -> str:
+        """简单问答接口 - 直接用Chat模型回答"""
+        if self.llm.provider is None:
+            raise RuntimeError("LLM提供者未初始化")
+
+        try:
+            messages = [
+                {"role": "system", "content": "你是一个友好的AI助手，请直接回答用户的问题，保持简洁明了。"},
+                {"role": "user", "content": user_input}
+            ]
+
+            response = await self.llm.generate(
+                messages=messages,
+                max_tokens=1000,
+                temperature=0.7
+            )
+
+            return response.content.strip()
+
+        except Exception as e:
+            logger.error(f"简单问答失败: {e}")
+            return f"抱歉，处理您的请求时出现错误: {str(e)}"
+
     async def _process_with_m3_stream(self, user_query: str, context: Optional[Dict[str, Any]] = None):
         """使用M3编排器处理查询（真·流式：assistant_content进聊天气泡，其他事件进状态栏）"""
         if not hasattr(self, 'orchestrator') or not self.orchestrator:
@@ -511,21 +534,120 @@ class AgentCore:
             return
 
         try:
-            # 状态：开始规划
-            yield {"type": "status", "message": "正在规划任务"}
+            # 检查是否是续跑场景（context包含user_answer）
+            is_resume = context and "user_answer" in context
 
-            # 执行编排
-            result = await self.orchestrator.orchestrate(user_query=user_query, context=context)
+            if is_resume:
+                # 续跑场景：继续执行已有的任务
+                print("[DEBUG] 检测到续跑场景，开始继续执行任务")
+                yield {"type": "status", "message": "正在继续执行任务"}
+
+                session_id = context.get("session_id")
+                user_answer = context.get("user_answer")
+
+                if session_id:
+                    from orchestrator import get_session
+                    session = get_session(session_id)
+
+                    if session.active_task:
+                        # 使用现有的任务状态继续执行
+                        # 将用户答案添加到execution_state中
+                        if session.active_task.execution_state:
+                            # 查找等待用户输入的步骤，并设置答案
+                            ask_user_pending = session.active_task.execution_state.get_artifact("ask_user_pending")
+                            if ask_user_pending and isinstance(ask_user_pending, dict):
+                                output_key = ask_user_pending.get("output_key", "user_location")
+                                session.active_task.execution_state.set_artifact(output_key, user_answer)
+                                # 清除ask_user_pending状态，防止重复询问
+                                session.active_task.execution_state.set_artifact("ask_user_pending", None)
+                                print(f"[DEBUG] 设置用户答案到 {output_key}: {user_answer}，清除ask_user_pending状态")
+
+                        # 使用现有的active_task继续编排 - 使用resume标识符避免重新规划
+                        result = await self.orchestrator.orchestrate(user_query="RESUME_TASK", context=context, active_task=session.active_task)
+                    else:
+                        # 没有活跃任务，尝试重新规划并创建新的active_task
+                        print(f"[DEBUG] 续跑场景没有找到active_task，重新规划")
+                        result = await self.orchestrator.orchestrate(user_query="", context=context)
+
+                        # 确保重新规划后有active_task
+                        if result.final_plan or result.execution_state:
+                            if not session.active_task:
+                                from orchestrator.orchestrator import ActiveTask
+                                session.active_task = ActiveTask()
+                                session.active_task.plan = result.final_plan
+                                session.active_task.execution_state = result.execution_state
+                                print(f"[DEBUG] 续跑重新规划后创建active_task - session_id: {session_id}")
+                else:
+                    result = await self.orchestrator.orchestrate(user_query="", context=context)
+            else:
+                # 正常规划场景
+                print("[DEBUG] 发送状态事件: 正在规划任务")
+                yield {"type": "status", "message": "正在规划任务"}
+
+                # 模拟规划过程的思维链
+                planning_steps = [
+                    "分析用户查询意图...",
+                    "制定执行计划...",
+                    "准备调用相关工具...",
+                    "优化执行步骤..."
+                ]
+
+                for step in planning_steps:
+                    print(f"[DEBUG] 发送思维链: {step}")
+                    yield {"type": "assistant_content", "content": step + " "}
+                    await asyncio.sleep(0.1)
+
+                # 执行编排
+                result = await self.orchestrator.orchestrate(user_query=user_query, context=context)
+
+            # 检查是否需要用户输入
+            print(f"[DEBUG] 检查ask_user状态 - status: {result.status}, pending_questions: {result.pending_questions}")
+            if result.status == "ask_user" and result.pending_questions:
+                question = result.pending_questions[0]
+                print(f"[DEBUG] 发送 ask_user 事件: {question}")
+                yield {"type": "ask_user", "question": question, "context": "需要用户信息"}
+                return  # 等待用户输入，不要继续执行
+
+            # 检查是否处于等待用户输入状态
+            if result.status == "waiting_for_user" and result.pending_questions:
+                question = result.pending_questions[0]
+                print(f"[DEBUG] 发送 ask_user 事件 (waiting状态): {question}")
+                yield {"type": "ask_user", "question": question, "context": "需要用户信息"}
+                return  # 等待用户输入，不要继续执行
 
             # 状态：开始执行
+            print("[DEBUG] 发送状态事件: 正在执行任务")
             yield {"type": "status", "message": "正在执行任务"}
+
+            # 模拟执行过程的思维链
+            if result.final_plan and result.final_plan.steps:
+                for i, step in enumerate(result.final_plan.steps, 1):
+                    step_type_str = step.type.value if hasattr(step.type, 'value') else str(step.type)
+                    print(f"[DEBUG] 发送工具轨迹: 执行步骤 {i}: {step_type_str}")
+                    yield {"type": "tool_trace", "message": f"执行步骤 {i}: {step_type_str}"}
+
+                    # 根据步骤类型显示不同的执行信息
+                    if step.type == "tool_call" and hasattr(step, 'tool') and step.tool:
+                        print(f"[DEBUG] 发送工具调用: 调用工具 {step.tool}")
+                        yield {"type": "assistant_content", "content": f"\n调用工具 {step.tool}... "}
+                    elif step.type == "web_search":
+                        print(f"[DEBUG] 发送网络搜索: 搜索 {step.inputs.get('query', '')}")
+                        yield {"type": "assistant_content", "content": f"\n执行网络搜索... "}
+                    elif step.type == "ask_user":
+                        print(f"[DEBUG] 发送用户询问: {step.inputs.get('question', '')}")
+                        yield {"type": "assistant_content", "content": f"\n需要用户信息... "}
+                    elif step.type == "summarize":
+                        print(f"[DEBUG] 发送数据汇总: {step.expect}")
+                        yield {"type": "assistant_content", "content": f"\n汇总分析数据... "}
+
+                    await asyncio.sleep(0.1)
 
             # 处理最终结果
             final_content = ""
 
             if result.final_answer:
                 # 有明确的最终答案
-                final_content = result.final_answer
+                final_content = "\n\n" + result.final_answer
             elif result.status == "completed" and hasattr(result, 'execution_state') and result.execution_state:
                 # 任务完成但没有明确答案，从artifacts中构造有意义的响应
                 artifacts = result.execution_state.artifacts
@@ -550,23 +672,20 @@ class AgentCore:
                     response_parts.append("文件已保存到指定位置")
 
                 if response_parts:
-                    final_content = "\n\n".join(response_parts)
+                    final_content = "\n\n" + "\n\n".join(response_parts)
                 else:
-                    final_content = "任务已完成，所有步骤都已成功执行。"
+                    final_content = "\n\n任务已完成，所有步骤都已成功执行。"
             else:
                 # 其他状态（如ask_user/waiting），不向聊天气泡写入误导性文本
                 final_content = ""
 
-            # 流式输出最终内容
+            # 真·流式输出最终内容
             if final_content:
-                chunk_size = 50  # 每批50个字符
-                for i in range(0, len(final_content), chunk_size):
-                    chunk = final_content[i:i+chunk_size]
-                    yield {"type": "assistant_content", "content": chunk}
-                    # 短暂延迟模拟流式效果
-                    await asyncio.sleep(0.01)
+                print(f"[DEBUG] 发送最终内容: {final_content[:100]}...")
+                yield {"type": "assistant_content", "content": final_content}
 
             # 状态：处理完成
+            print("[DEBUG] 发送状态事件: 处理完成")
             yield {"type": "status", "message": "处理完成"}
 
         except Exception as e:
@@ -589,6 +708,34 @@ class AgentCore:
         try:
             # 使用编排器处理查询
             orchestrator_result = await self.orchestrator.orchestrate(user_query, context)
+
+            # 确保session中有active_task（无论是ask_user状态还是正常完成状态）
+            if context and "session_id" in context:
+                session_id = context["session_id"]
+                from orchestrator import get_session
+                session = get_session(session_id)
+
+                # 创建active_task来保存当前状态
+                if not session.active_task:
+                    from orchestrator.orchestrator import ActiveTask
+                    session.active_task = ActiveTask()
+                    session.active_task.plan = orchestrator_result.final_plan
+                    session.active_task.execution_state = orchestrator_result.execution_state
+                    session.active_task.iteration_count = orchestrator_result.iteration_count
+                    session.active_task.plan_iterations = orchestrator_result.plan_iterations
+                    session.active_task.total_tool_calls = orchestrator_result.total_tool_calls
+                    print(f"[DEBUG] agent_core创建active_task - session_id: {session_id}, active_task: {session.active_task is not None}, status: {orchestrator_result.status}")
+
+                # 更新active_task状态（如果已存在）
+                else:
+                    if orchestrator_result.final_plan:
+                        session.active_task.plan = orchestrator_result.final_plan
+                    if orchestrator_result.execution_state:
+                        session.active_task.execution_state = orchestrator_result.execution_state
+                    session.active_task.iteration_count = orchestrator_result.iteration_count
+                    session.active_task.plan_iterations = orchestrator_result.plan_iterations
+                    session.active_task.total_tool_calls = orchestrator_result.total_tool_calls
+                    print(f"[DEBUG] agent_core更新active_task - session_id: {session_id}, status: {orchestrator_result.status}")
 
             # 检查是否处于ask_user状态
             if orchestrator_result.status == "ask_user" and orchestrator_result.execution_state:
