@@ -563,15 +563,25 @@ class Orchestrator:
                                 result.pending_questions = questions
                                 logger.info(f"设置pending_questions: {questions}")
 
+                                # 调试：打印ask_user_pending的完整内容
+                                logger.info(f"[DEBUG] ask_user_pending完整内容: {ask_user_pending}")
+
                                 # 同时设置session的pending_ask（用于UI层的状态管理）
                                 session_id = context.get("session_id") if context else None
                                 if session_id:
                                     from orchestrator import get_session
                                     session = get_session(session_id)
-                                    # 生成ask_id并设置pending_ask
-                                    ask_id = ask_user_pending.get("step_id", f"ask_{int(time.time())}")
-                                    session.set_pending_ask(questions[0], ask_id)
-                                    logger.info(f"设置session pending_ask: {questions[0]} (ask_id: {ask_id})")
+                                    # 使用真正的ask_id（从executor生成的），确保与UI层保持一致
+                                    true_ask_id = ask_user_pending.get("ask_id", f"ask_{int(time.time())}")
+                                    step_id = ask_user_pending.get("step_id", "")
+                                    output_key = ask_user_pending.get("output_key", "")
+
+                                    logger.info(f"[DEBUG] 从ask_user_pending提取: ask_id={true_ask_id}, step_id={step_id}, output_key={output_key}")
+
+                                    session.set_pending_ask(questions[0], true_ask_id)
+
+                                    logger.info(f"[DEBUG] session.pending_ask设置完成: ask_id={session.pending_ask.ask_id if session.pending_ask else 'NONE'}, expects={session.pending_ask.expects if session.pending_ask else 'NONE'}")
+                                    logger.info(f"设置session pending_ask: {questions[0]} (true_ask_id: {true_ask_id}, step_id: {step_id})")
 
                     break
 

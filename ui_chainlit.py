@@ -135,7 +135,10 @@ async def handle_resume_with_answer(user_answer: str, session_id: str):
 
     # 验证ask_id一致性
     current_ask_id = cl.user_session.get("current_ask_id", "")
+    print(f"[DEBUG] UI校验ask_id一致性: current_ask_id='{current_ask_id}', session.pending_ask.ask_id='{session.pending_ask.ask_id if session.pending_ask else 'NONE'}'")
+
     if not session_manager.validate_ask_id_consistency(session, current_ask_id):
+        print(f"[DEBUG] AskID不一致! 期望: '{session.pending_ask.ask_id if session.pending_ask else 'NONE'}', 实际: '{current_ask_id}'")
         # 记录session不匹配事件
         from utils.telemetry import log_session_mismatch
         expected_ask_id = session.pending_ask.ask_id if session.pending_ask else ""
@@ -345,6 +348,8 @@ async def handle_resume_with_answer(user_answer: str, session_id: str):
             session.add_message("assistant", full_content)
 
     except Exception as e:
+        # 确保token_count在异常情况下也有默认值
+        token_count = 0
         error_msg = await cl.Message(content=f"❌ 续跑失败: {str(e)}", author="助手").send()
 
         # 记录错误消息到对话历史
@@ -396,6 +401,8 @@ async def handle_complex_plan(user_input: str, session_id: str):
         sidebar_logs = []
         # 累积assistant_content
         full_content = ""
+        # token计数用于调试
+        token_count = 0
 
         # 正确处理异步生成器 - agent_core._process_with_m3_stream是async def
         async for event in agent_core._process_with_m3_stream(user_input, context={"session_id": session_id}):
@@ -478,6 +485,8 @@ async def handle_complex_plan(user_input: str, session_id: str):
             session.add_message("assistant", full_content)
 
     except Exception as e:
+        # 确保token_count在异常情况下也有默认值
+        token_count = 0
         error_msg = await cl.Message(content=f"❌ 处理失败: {str(e)}", author="助手").send()
 
         # 记录错误消息到对话历史

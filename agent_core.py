@@ -607,8 +607,10 @@ class AgentCore:
                             }
                             # 临时将execution_state设置为字典格式
                             session.active_task.execution_state = execution_state_dict
+                            print(f"[DEBUG] 续跑前execution_state: ask_user_pending={execution_state_dict.get('artifacts', {}).get('ask_user_pending', 'NOT_FOUND')}")
                             result = await self.orchestrator.orchestrate(user_query="RESUME_TASK", context=context, active_task=session.active_task)
-                            # 重要：不要恢复原始execution_state，使用orchestrator返回的结果
+                            print(f"[DEBUG] 续跑后result.execution_state类型: {type(result.execution_state)}")
+                            # 使用orchestrator返回的最新execution_state
                         else:
                             result = await self.orchestrator.orchestrate(user_query="RESUME_TASK", context=context, active_task=session.active_task)
                     else:

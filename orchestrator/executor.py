@@ -524,11 +524,14 @@ class Executor:
             "question": question,
             "step_id": step.step_id,
             "output_key": step.output_key,
-            "context": inputs.get("context", "")
+            "context": inputs.get("context", ""),
+            "questions": [question]  # 确保questions字段存在
         }
 
         state.set_artifact("ask_user_pending", ask_user_pending)
+        logger.info(f"[DEBUG] Executor设置ask_user_pending状态: ask_id={ask_id}, step_id={step.step_id}, output_key={step.output_key}")
         logger.info(f"设置ask_user_pending状态，ask_id: {ask_id}, 问题: {question}")
+        logger.info(f"[DEBUG] ask_user_pending完整内容: {ask_user_pending}")
 
         # Telemetry: 记录ask_user_open事件
         from utils.telemetry import log_ask_user_open
