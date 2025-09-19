@@ -135,7 +135,10 @@ async def handle_resume_with_answer(user_answer: str, session_id: str):
 
     # 验证ask_id一致性
     current_ask_id = cl.user_session.get("current_ask_id", "")
+    print(f"[DEBUG] UI校验ask_id一致性: current_ask_id='{current_ask_id}', session.pending_ask.ask_id='{session.pending_ask.ask_id if session.pending_ask else 'NONE'}'")
+
     if not session_manager.validate_ask_id_consistency(session, current_ask_id):
+        print(f"[DEBUG] AskID不一致! 期望: '{session.pending_ask.ask_id if session.pending_ask else 'NONE'}', 实际: '{current_ask_id}'")
         # 记录session不匹配事件
         from utils.telemetry import log_session_mismatch
         expected_ask_id = session.pending_ask.ask_id if session.pending_ask else ""
